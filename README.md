@@ -27,20 +27,21 @@ npm start
 
 ## Servidor
 
-Ubuntu con acceso SSH.
+Oracle Linux, Ubuntu o Debian, con acceso SSH y `sudo`.
 
-1. Copia el instalador y ejecútalo con tu dominio:
+1. En el servidor:
    ```bash
-   scp deploy/install.sh usuario@servidor:
-   ssh usuario@servidor sudo bash install.sh contenido.ejemplo.com
+   curl -fsSL https://raw.githubusercontent.com/squai-org/content-engine/main/deploy/install.sh -o install.sh
+   sudo bash install.sh contenido.ejemplo.com
    ```
-2. La primera vez muestra una llave pública. Agrégala en GitHub, en Settings, Deploy keys, solo lectura, y ejecuta de nuevo.
-3. Anota la contraseña que imprime. Define `IG_APP_ID` e `IG_APP_SECRET` en `/etc/content-engine.env` y reinicia con `sudo systemctl restart content-engine`.
-4. Inicia sesión de Claude una vez:
+2. Anota la contraseña que imprime. Define `IG_APP_ID` e `IG_APP_SECRET` en `/etc/content-engine.env` y reinicia con `sudo systemctl restart content-engine`.
+3. Inicia sesión de Claude una vez:
    ```bash
-   ssh -t usuario@servidor sudo runuser -u contenido -- env HOME=/var/lib/content-engine/home claude
+   sudo runuser -u contenido -- env HOME=/var/lib/content-engine/home claude
    ```
-5. Abre los puertos 80 y 443 en la lista de seguridad de Oracle y en el firewall de la instancia.
+4. Abre los puertos 80 y 443 en la lista de seguridad de la red de Oracle (VCN). El instalador ya los abre en el firewall de la instancia.
+
+Para un repo privado, usa `REPO=git@github.com:squai-org/content-engine.git`: el instalador genera una llave que debes agregar como Deploy key de solo lectura.
 
 ## Actualizar
 

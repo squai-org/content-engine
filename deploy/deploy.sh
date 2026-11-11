@@ -10,6 +10,10 @@ BRANCH="${BRANCH:-main}"
 BROWSERS="${PLAYWRIGHT_BROWSERS_PATH:-/opt/ms-playwright}"
 PLAYWRIGHT_CLI="${PLAYWRIGHT_CLI:-$APP_DIR/node_modules/.bin/playwright-core}"
 TARGET="${1:-origin/$BRANCH}"
+PLAYWRIGHT_DEPS=""
+if command -v apt-get >/dev/null; then
+  PLAYWRIGHT_DEPS="--with-deps"
+fi
 
 as_app() {
   runuser -u "$APP_USER" -- env HOME="$APP_HOME" "$@"
@@ -18,7 +22,7 @@ as_app() {
 build() {
   as_app npm --prefix "$APP_DIR" ci --ignore-scripts || return 1
   as_app npm --prefix "$APP_DIR" run build || return 1
-  PLAYWRIGHT_BROWSERS_PATH="$BROWSERS" "$PLAYWRIGHT_CLI" install --with-deps chromium || return 1
+  PLAYWRIGHT_BROWSERS_PATH="$BROWSERS" "$PLAYWRIGHT_CLI" install $PLAYWRIGHT_DEPS chromium || return 1
 }
 
 healthy() {
