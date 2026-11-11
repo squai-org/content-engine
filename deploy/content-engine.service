@@ -1,0 +1,22 @@
+[Unit]
+Description=Content Engine
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=contenido
+WorkingDirectory=/opt/content-engine
+EnvironmentFile=/etc/content-engine.env
+Environment=HOME=/var/lib/content-engine/home
+Environment=PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright
+ExecStart=/usr/bin/node src/server/index.ts
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/content-engine
+
+[Install]
+WantedBy=multi-user.target

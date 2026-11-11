@@ -1,0 +1,6 @@
+[Unit]
+Description=Content Engine backup
+
+[Service]
+Type=oneshot
+ExecStart=/opt/content-engine/deploy/backup.sh
