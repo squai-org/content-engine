@@ -8,6 +8,7 @@ SERVICE="${SERVICE:-content-engine}"
 HEALTH_URL="${HEALTH_URL:-http://127.0.0.1:8787/api/health}"
 BRANCH="${BRANCH:-main}"
 BROWSERS="${PLAYWRIGHT_BROWSERS_PATH:-/opt/ms-playwright}"
+PLAYWRIGHT_CLI="${PLAYWRIGHT_CLI:-$APP_DIR/node_modules/.bin/playwright-core}"
 TARGET="${1:-origin/$BRANCH}"
 
 as_app() {
@@ -17,7 +18,7 @@ as_app() {
 build() {
   as_app npm --prefix "$APP_DIR" ci --ignore-scripts || return 1
   as_app npm --prefix "$APP_DIR" run build || return 1
-  PLAYWRIGHT_BROWSERS_PATH="$BROWSERS" "$APP_DIR/node_modules/.bin/playwright-core" install --with-deps chromium || return 1
+  PLAYWRIGHT_BROWSERS_PATH="$BROWSERS" "$PLAYWRIGHT_CLI" install --with-deps chromium || return 1
 }
 
 healthy() {
