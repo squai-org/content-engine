@@ -16,7 +16,7 @@ Planea, produce, revisa y publica contenido de Instagram con agentes de Claude C
 - Chromium
 - Cuenta profesional de Instagram y una app de Meta
 
-## Uso
+## Desarrollo local
 
 ```bash
 cp .env.example .env
@@ -24,6 +24,39 @@ npm install
 npm run build
 npm start
 ```
+
+## Servidor
+
+Ubuntu con acceso SSH.
+
+1. Copia el instalador y ejecútalo con tu dominio:
+   ```bash
+   scp deploy/install.sh usuario@servidor:
+   ssh usuario@servidor sudo bash install.sh contenido.ejemplo.com
+   ```
+2. La primera vez muestra una llave pública. Agrégala en GitHub, en Settings, Deploy keys, solo lectura, y ejecuta de nuevo.
+3. Anota la contraseña que imprime. Define `IG_APP_ID` e `IG_APP_SECRET` en `/etc/content-engine.env` y reinicia con `sudo systemctl restart content-engine`.
+4. Inicia sesión de Claude una vez:
+   ```bash
+   ssh -t usuario@servidor sudo runuser -u contenido -- env HOME=/var/lib/content-engine/home claude
+   ```
+5. Abre los puertos 80 y 443 en la lista de seguridad de Oracle y en el firewall de la instancia.
+
+## Actualizar
+
+```bash
+ssh usuario@servidor sudo content-engine-deploy
+```
+
+Para una versión concreta: `content-engine-deploy <sha>`. Si el servicio no responde tras el despliegue, vuelve solo a la versión anterior.
+
+## Operación
+
+| Tarea | Comando |
+| --- | --- |
+| Logs | `journalctl -u content-engine -f` |
+| Respaldo | Diario a las 03:00 en `/var/backups/content-engine`, 14 días |
+| Descargar respaldos | `scp usuario@servidor:/var/backups/content-engine/* .` |
 
 ## Conectar Instagram
 
@@ -37,6 +70,7 @@ npm start
 
 | Variable | Uso |
 | --- | --- |
+| `HOST` | Interfaz donde escucha. Por defecto `127.0.0.1`. |
 | `PUBLIC_URL` | URL pública del servidor. Instagram descarga las piezas desde aquí. |
 | `ADMIN_PASSWORD` | Contraseña de la interfaz. |
 | `SESSION_SECRET` | Secreto de la sesión. |
@@ -52,6 +86,7 @@ npm start
 | --- | --- |
 | `src/server` | API, cola, agentes, render y publicador |
 | `src/web` | Interfaz |
+| `deploy` | Instalador, despliegue, respaldo y servicios |
 | `seed` | Agentes, skills, bases y templates iniciales |
 | `data` | Base de datos, piezas y copia editable de `seed` |
 
