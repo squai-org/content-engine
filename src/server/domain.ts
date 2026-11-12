@@ -80,6 +80,23 @@ export function isFormat(value: unknown): value is Format {
   return FORMATS.includes(value as Format);
 }
 
+const FORMAT_ALIASES: Record<string, Format> = {
+  carousel: 'carrusel',
+  imagen: 'post',
+  image: 'post',
+  historia: 'story',
+  historias: 'story',
+  stories: 'story',
+  video: 'reel',
+  reels: 'reel',
+};
+
+export function normalizeFormat(value: unknown): Format | null {
+  const key = String(value ?? '').trim().toLowerCase();
+  if (isFormat(key)) return key;
+  return FORMAT_ALIASES[key] ?? null;
+}
+
 const EMOJI = /\p{Extended_Pictographic}/gu;
 const MAX_CAPTION = 2200;
 const MAX_HASHTAGS = 30;
