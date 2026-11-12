@@ -14,6 +14,8 @@ export type Config = {
   chromiumPath: string | undefined;
   ffmpegPath: string;
   headlessShellPath: string | undefined;
+  transcribeModel: string;
+  transcribeLanguage: string;
   igUserId: string;
   igAccessToken: string;
   igGraphUrl: string;
@@ -45,6 +47,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     chromiumPath: env.CHROMIUM_PATH || undefined,
     ffmpegPath: env.FFMPEG_PATH || 'ffmpeg',
     headlessShellPath: env.HEADLESS_SHELL_PATH || undefined,
+    transcribeModel: env.TRANSCRIBE_MODEL || 'small',
+    transcribeLanguage: env.TRANSCRIBE_LANGUAGE || 'es',
     igUserId: env.IG_USER_ID ?? '',
     igAccessToken: env.IG_ACCESS_TOKEN ?? '',
     igGraphUrl: (env.IG_GRAPH_URL ?? `https://graph.facebook.com/${graphVersion}`).replace(/\/$/, ''),

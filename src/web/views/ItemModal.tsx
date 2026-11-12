@@ -10,6 +10,7 @@ import {
   type Status,
   type Taxonomy,
   upload,
+  uploadFootage,
 } from '../api.ts';
 import type { Draft } from '../App.tsx';
 import { Icon, Modal } from '../ui.tsx';
@@ -82,6 +83,8 @@ export function ItemModal({
   const [dirty, setDirty] = useState(false);
   const [error, setError] = useState('');
   const fileInput = useRef<HTMLInputElement>(null);
+  const footageInput = useRef<HTMLInputElement>(null);
+  const [uploading, setUploading] = useState(false);
   const dirtyRef = useRef(false);
   dirtyRef.current = dirty;
 
@@ -166,6 +169,11 @@ export function ItemModal({
     onChanged();
     onClose();
   }
+
+  const sendFootage = (file: File) => {
+    setUploading(true);
+    run(() => uploadFootage(itemId as string, file)).finally(() => setUploading(false));
+  };
 
   const status = item?.status;
   const locked = status ? BUSY.includes(status) || status === 'publicada' : false;
@@ -347,6 +355,39 @@ export function ItemModal({
           {options('services', taxonomy.services)}
           {options('funnel', taxonomy.funnel)}
           {options('ctas', taxonomy.ctas)}
+
+          {item?.format === 'reel' && status !== 'publicada' && status !== 'publicando' && (
+            <div className="footage">
+              <input
+                ref={footageInput}
+                type="file"
+                accept=".mp4,.mov,.m4v,.webm,video/*"
+                hidden
+                onChange={(event) => {
+                  const file = event.target.files?.[0];
+                  if (file) sendFootage(file);
+                  event.target.value = '';
+                }}
+              />
+              <span className="nav-icon big" style={{ '--tone': 'var(--purple)' } as React.CSSProperties}>
+                <Icon name="video" size={18} />
+              </span>
+              <span className="list-main">
+                <b>{item.footage ? 'Video grabado cargado' : 'Video grabado'}</b>
+                <span className="muted">
+                  {uploading
+                    ? 'Subiendo. No cierres esta ventana.'
+                    : item.footage
+                      ? 'El agente lo transcribe, le pone subtítulos y animaciones.'
+                      : 'Sube tu grabación y el agente la edita: subtítulos, títulos y animaciones. Sin video, el reel se anima desde el guion.'}
+                </span>
+              </span>
+              <button type="button" disabled={uploading} onClick={() => footageInput.current?.click()}>
+                <Icon name="upload" size={14} />
+                {item.footage ? 'Cambiar' : 'Subir video'}
+              </button>
+            </div>
+          )}
 
           {produced && (
             <label className="field">

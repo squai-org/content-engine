@@ -18,14 +18,14 @@ type KindSpec = { dir: string; extensions: string[]; nested?: string };
 
 const SPECS: Record<Kind, KindSpec> = {
   bases: { dir: 'bases', extensions: ['.md'] },
-  templates: { dir: 'templates', extensions: ['.html', '.css', '.tsx'] },
+  templates: { dir: 'templates', extensions: ['.html', '.css'] },
   skills: { dir: '.claude/skills', extensions: [], nested: 'SKILL.md' },
   agents: { dir: '.claude/agents', extensions: ['.md'] },
 };
 
 const NAME = /^[a-z0-9][a-z0-9-]*(\.[a-z]+)?$/;
 
-export const ENGINES = ['nativo', 'hyperframes', 'remotion'] as const;
+export const ENGINES = ['nativo', 'hyperframes'] as const;
 export type Engine = (typeof ENGINES)[number];
 export type TemplateInfo = {
   name: string;
@@ -33,6 +33,7 @@ export type TemplateInfo = {
   height: number;
   formats: string[];
   engine: Engine;
+  footage: boolean;
 };
 
 export function isKind(value: string): value is Kind {
@@ -71,6 +72,7 @@ export function templateMeta(html: string): Omit<TemplateInfo, 'name'> | null {
     height: Number(size[2]),
     formats: formats[1].split(',').map((format) => format.trim()),
     engine: engine && ENGINES.includes(engine) ? engine : 'nativo',
+    footage: /<meta name="footage" content="si"/.test(html),
   };
 }
 
@@ -100,6 +102,15 @@ export function syncSeed(root: string, seedDir: string): string[] {
     const current = fingerprint(target);
     if (current === seedHash) manifest[file] = seedHash;
     else if (manifest[file] === current || (fresh && history[file]?.includes(current))) copy();
+  }
+  const current = new Set(walk(seedDir));
+  for (const file of Object.keys(manifest)) {
+    if (current.has(file)) continue;
+    const target = join(root, file);
+    if (existsSync(target) && (fingerprint(target) === manifest[file] || history[file]?.includes(fingerprint(target)))) {
+      rmSync(target, { force: true });
+    }
+    delete manifest[file];
   }
   writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 1)}\n`);
   return written;
@@ -148,10 +159,15 @@ export function createWorkspace(root: string, seedDir: string) {
     return meta ? { name, ...meta } : null;
   }
 
-  function templatesFor(format: Format): TemplateInfo[] {
+  function templatesFor(format: Format, footage = false): TemplateInfo[] {
     return list('templates')
       .map(templateInfo)
-      .filter((info): info is TemplateInfo => info?.formats.includes(format) ?? false);
+      .filter(
+        (info): info is TemplateInfo =>
+          (info?.formats.includes(format) ?? false) &&
+          info?.footage === footage &&
+          (format === 'reel') === (info?.engine === 'hyperframes'),
+      );
   }
 
   return {
@@ -171,11 +187,13 @@ export function createWorkspace(root: string, seedDir: string) {
       rmSync(SPECS[kind].nested ? dirname(path) : path, { recursive: true, force: true });
     },
 
-    pickTemplate(preferred: string, format: Format): TemplateInfo {
-      const options = templatesFor(format);
+    pickTemplate(preferred: string, format: Format, footage = false): TemplateInfo {
+      const options = templatesFor(format, footage);
       const wanted = preferred.trim().split(/\s/)[0];
       const match = options.find((option) => option.name === wanted) ?? options[0];
-      if (!match) throw new Error(`No hay template para el formato ${format}.`);
+      if (!match) {
+        throw new Error(`No hay template para el formato ${format}${footage ? ' con video grabado' : ''}.`);
+      }
       return match;
     },
 

@@ -1,33 +1,32 @@
-import { spawn } from 'node:child_process';
 import { mkdirSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { dirname } from 'node:path';
 import { type Browser, chromium, type Page } from 'playwright-core';
-import type { Slide } from './domain.ts';
+import type { Edit, Slide } from './domain.ts';
 
 export type RenderJob = { html: string; width: number; height: number; path: string };
 export type Renderer = (jobs: RenderJob[]) => Promise<void>;
 
-export type VideoScene = { html: string; seconds: number };
-export type VideoJob = {
-  scenes: VideoScene[];
-  width: number;
-  height: number;
-  path: string;
-  signal?: AbortSignal;
-};
-export type VideoRenderer = (job: VideoJob) => Promise<void>;
-
 export type CompositionScene = Required<Slide> & { start: number; seconds: number };
-export type CompositionData = { service: string; duration: number; scenes: CompositionScene[] };
+export type CompositionData = {
+  service: string;
+  duration: number;
+  scenes: CompositionScene[];
+  footage?: { src: string; start: number };
+  edit?: Edit;
+};
 export type CompositionJob = {
-  engine: 'hyperframes' | 'remotion';
   template: string;
   data: CompositionData;
   width: number;
   height: number;
   path: string;
+  footage?: string;
   signal?: AbortSignal;
+};
+export type MediaTools = {
+  normalize: (source: string, target: string, signal?: AbortSignal) => Promise<number>;
+  transcribe: (path: string, signal?: AbortSignal) => Promise<{ text: string; start: number; end: number }[]>;
 };
 export type Composer = (job: CompositionJob) => Promise<void>;
 
@@ -115,6 +114,8 @@ export function buildCompositionHtml(template: string, tokens: string, data: Com
     tokens,
     data: JSON.stringify(data).replace(/</g, '\\u003c'),
     duration: String(data.duration),
+    footage: data.footage?.src ?? '',
+    media_start: String(data.footage?.start ?? 0),
   };
   return template.replace(/\{\{(\w+)\}\}/g, (match, key: string) => values[key] ?? match);
 }
@@ -155,97 +156,6 @@ export function chromiumRenderer(executablePath: string | undefined): Renderer {
         await load(page, job.html);
         await page.screenshot({ path: job.path, type: 'jpeg', quality: 92 });
         await page.close();
-      }
-    });
-}
-
-function seek(milliseconds: number): void {
-  for (const animation of document.getAnimations()) {
-    animation.pause();
-    animation.currentTime = milliseconds;
-  }
-}
-
-export function chromiumVideoRenderer(
-  executablePath: string | undefined,
-  ffmpegPath: string,
-): VideoRenderer {
-  return (job) =>
-    withBrowser(executablePath, async (browser) => {
-      mkdirSync(dirname(job.path), { recursive: true });
-      const encoder = spawn(
-        ffmpegPath,
-        [
-          '-y',
-          '-loglevel', 'error',
-          '-f', 'image2pipe',
-          '-framerate', String(VIDEO_FPS),
-          '-c:v', 'mjpeg',
-          '-i', '-',
-          '-f', 'lavfi',
-          '-i', 'anullsrc=channel_layout=stereo:sample_rate=44100',
-          '-shortest',
-          '-c:v', 'libx264',
-          '-preset', 'veryfast',
-          '-crf', '20',
-          '-pix_fmt', 'yuv420p',
-          '-r', String(VIDEO_FPS),
-          '-c:a', 'aac',
-          '-b:a', '128k',
-          '-movflags', '+faststart',
-          job.path,
-        ],
-        { stdio: ['pipe', 'ignore', 'pipe'] },
-      );
-      let stderr = '';
-      encoder.stderr.on('data', (chunk: Buffer) => {
-        stderr = (stderr + chunk.toString()).slice(-2000);
-      });
-      encoder.stdin.on('error', () => {});
-      const finished = new Promise<void>((done, fail) => {
-        encoder.on('error', (error: NodeJS.ErrnoException) =>
-          fail(
-            new Error(
-              error.code === 'ENOENT'
-                ? 'Falta ffmpeg en el servidor. Instálalo o define FFMPEG_PATH.'
-                : error.message,
-            ),
-          ),
-        );
-        encoder.on('close', (code) =>
-          code === 0 ? done() : fail(new Error(`ffmpeg falló: ${stderr.trim() || code}`)),
-        );
-      });
-      finished.catch(() => {});
-
-      try {
-        for (const scene of job.scenes) {
-          const page = await browser.newPage({
-            viewport: { width: job.width, height: job.height },
-            deviceScaleFactor: 1,
-          });
-          const session = await page.context().newCDPSession(page);
-          await load(page, scene.html);
-          const frames = Math.max(1, Math.round(scene.seconds * VIDEO_FPS));
-          for (let frame = 0; frame < frames; frame += 1) {
-            job.signal?.throwIfAborted();
-            if (encoder.exitCode !== null) break;
-            await page.evaluate(seek, (frame * 1000) / VIDEO_FPS);
-            const shot = await session.send('Page.captureScreenshot', {
-              format: 'jpeg',
-              quality: 88,
-              optimizeForSpeed: true,
-            });
-            const flushed = encoder.stdin.write(Buffer.from(shot.data, 'base64'));
-            if (!flushed) await new Promise((done) => encoder.stdin.once('drain', done));
-          }
-          await page.close();
-        }
-        encoder.stdin.end();
-        await finished;
-      } catch (error) {
-        encoder.kill('SIGKILL');
-        throw error;
       }
     });
 }

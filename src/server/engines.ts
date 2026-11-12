@@ -1,21 +1,21 @@
 import { spawn } from 'node:child_process';
-import { createHash, randomUUID } from 'node:crypto';
-import { copyFileSync, existsSync, mkdirSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
+import { copyFileSync, existsSync, mkdirSync, readFileSync, symlinkSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { homedir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, join } from 'node:path';
 import type { Config } from './config.ts';
 import {
   buildCompositionHtml,
   type Composer,
   type CompositionJob,
+  type MediaTools,
   gsapPath,
   localGsap,
   VIDEO_FPS,
 } from './render.ts';
 
 const WORKERS = 2;
-const KEEP_BUNDLES = 3;
 const SHELL_NAMES = ['chrome-headless-shell', 'headless_shell'];
 const require = createRequire(import.meta.url);
 
@@ -68,6 +68,75 @@ export function findHeadlessShell(roots: string[]): string | undefined {
   return undefined;
 }
 
+function hyperframesCli(): string {
+  return join(dirname(require.resolve('hyperframes/package.json')), 'bin', 'hyperframes.mjs');
+}
+
+const HYPERFRAMES_ENV = { HYPERFRAMES_NO_TELEMETRY: '1', HYPERFRAMES_SKIP_SKILLS: '1' };
+const MAX_FOOTAGE_SECONDS = 180;
+
+export function mediaTools(config: Config): MediaTools {
+  return {
+    async normalize(source, target, signal) {
+      mkdirSync(dirname(target), { recursive: true });
+      const result = await run(
+        config.ffmpegPath,
+        [
+          '-y', '-hide_banner',
+          '-i', source,
+          '-t', String(MAX_FOOTAGE_SECONDS),
+          '-map', '0:v:0', '-map', '0:a:0?',
+          '-vf', 'scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,fps=30',
+          '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '20', '-pix_fmt', 'yuv420p', '-g', '30',
+          '-c:a', 'aac', '-b:a', '128k', '-ar', '44100', '-ac', '2',
+          '-movflags', '+faststart',
+          target,
+        ],
+        { signal },
+      ).catch((error: NodeJS.ErrnoException) => {
+        if (error.code === 'ENOENT') throw new Error('Falta ffmpeg en el servidor. Instálalo o define FFMPEG_PATH.');
+        throw error;
+      });
+      if (result.code !== 0 || !existsSync(target)) {
+        throw new Error(`No pude leer el video subido: ${result.output.trim().slice(-400)}`);
+      }
+      const probe = await run(config.ffmpegPath, ['-hide_banner', '-i', target], { signal });
+      const time = /Duration: (\d+):(\d+):(\d+\.\d+)/.exec(probe.output);
+      if (!time) throw new Error('No pude medir la duración del video.');
+      return Number(time[1]) * 3600 + Number(time[2]) * 60 + Number(time[3]);
+    },
+
+    async transcribe(path, signal) {
+      const work = join(config.dataDir, 'cache', 'transcribe', randomUUID());
+      mkdirSync(work, { recursive: true });
+      try {
+        const result = await run(
+          process.execPath,
+          [
+            hyperframesCli(), 'transcribe', path,
+            '--dir', work,
+            '--engine', 'whisper',
+            '--model', config.transcribeModel,
+            '--language', config.transcribeLanguage,
+            '--json',
+          ],
+          { signal, env: { ...process.env, ...HYPERFRAMES_ENV } },
+        );
+        const file = join(work, 'transcript.json');
+        if (result.code !== 0 || !existsSync(file)) {
+          throw new Error(`No pude transcribir el video: ${result.output.trim().slice(-500) || result.code}`);
+        }
+        const words = JSON.parse(readFileSync(file, 'utf8')) as { text: string; start: number; end: number }[];
+        return words
+          .map((word) => ({ text: String(word.text).trim(), start: Number(word.start), end: Number(word.end) }))
+          .filter((word) => word.text);
+      } finally {
+        rmSync(work, { recursive: true, force: true });
+      }
+    },
+  };
+}
+
 async function ensureAudio(ffmpeg: string, path: string, signal?: AbortSignal): Promise<void> {
   const probe = await run(ffmpeg, ['-hide_banner', '-i', path], { signal });
   if (/Stream #\d+:\d+.*Audio:/.test(probe.output)) return;
@@ -101,22 +170,21 @@ export function videoComposer(config: Config, tokens: () => string): Composer {
     mkdirSync(project, { recursive: true });
     try {
       copyFileSync(gsapPath(), join(project, 'gsap.min.js'));
+      const data = { ...job.data };
+      if (job.footage && data.footage) {
+        symlinkSync(job.footage, join(project, 'footage.mp4'));
+        data.footage = { ...data.footage, src: 'footage.mp4' };
+      }
       writeFileSync(
         join(project, 'index.html'),
-        localGsap(buildCompositionHtml(job.template, tokens(), job.data), '<script src="gsap.min.js"></script>'),
+        localGsap(buildCompositionHtml(job.template, tokens(), data), '<script src="gsap.min.js"></script>'),
       );
-      const cli = join(dirname(require.resolve('hyperframes/package.json')), 'bin', 'hyperframes.mjs');
       const result = await run(
         process.execPath,
-        [cli, 'render', project, '-o', job.path, '--fps', String(VIDEO_FPS), '--workers', String(WORKERS), '--quiet'],
+        [hyperframesCli(), 'render', project, '-o', job.path, '--fps', String(VIDEO_FPS), '--workers', String(WORKERS), '--quiet'],
         {
           signal: job.signal,
-          env: {
-            ...process.env,
-            HYPERFRAMES_NO_TELEMETRY: '1',
-            HYPERFRAMES_SKIP_SKILLS: '1',
-            ...(shell ? { HYPERFRAMES_BROWSER_PATH: shell } : {}),
-          },
+          env: { ...process.env, ...HYPERFRAMES_ENV, ...(shell ? { HYPERFRAMES_BROWSER_PATH: shell } : {}) },
         },
       );
       if (result.code !== 0 || !existsSync(job.path)) {
@@ -127,97 +195,9 @@ export function videoComposer(config: Config, tokens: () => string): Composer {
     }
   }
 
-  async function remotionBundle(job: CompositionJob): Promise<string> {
-    const root = join(cache, 'remotion');
-    const hash = createHash('sha256')
-      .update(`${job.width}x${job.height}\n${job.template}`)
-      .digest('hex')
-      .slice(0, 16);
-    const project = join(root, hash);
-    const bundled = join(project, 'bundle');
-    if (existsSync(join(bundled, 'index.html'))) return bundled;
-    rmSync(project, { recursive: true, force: true });
-    mkdirSync(join(project, 'src'), { recursive: true });
-    writeFileSync(join(project, 'src', 'Template.tsx'), job.template);
-    writeFileSync(
-      join(project, 'src', 'index.tsx'),
-      [
-        "import { Composition, registerRoot } from 'remotion';",
-        "import Template from './Template';",
-        'const Root = () => (',
-        '  <Composition',
-        '    id="main"',
-        '    component={Template as never}',
-        `    width={${job.width}}`,
-        `    height={${job.height}}`,
-        `    fps={${VIDEO_FPS}}`,
-        `    durationInFrames={${VIDEO_FPS}}`,
-        "    defaultProps={{ service: '', duration: 1, scenes: [] }}",
-        '    calculateMetadata={({ props }) => ({',
-        `      durationInFrames: Math.max(1, Math.round((props as { duration: number }).duration * ${VIDEO_FPS})),`,
-        '    })}',
-        '  />',
-        ');',
-        'registerRoot(Root);',
-        '',
-      ].join('\n'),
-    );
-    const modules = resolve('node_modules');
-    const { bundle } = await import('@remotion/bundler');
-    try {
-      await bundle({
-        entryPoint: join(project, 'src', 'index.tsx'),
-        outDir: bundled,
-        enableCaching: false,
-        webpackOverride: (webpack) => ({
-          ...webpack,
-          resolve: { ...webpack.resolve, modules: [modules, 'node_modules'] },
-          resolveLoader: { ...webpack.resolveLoader, modules: [modules, 'node_modules'] },
-        }),
-      });
-    } catch (error) {
-      rmSync(project, { recursive: true, force: true });
-      throw new Error(`El template de Remotion no compila: ${(error as Error).message.slice(0, 800)}`);
-    }
-    const stale = readdirSync(root)
-      .map((name) => ({ name, at: statSync(join(root, name)).mtimeMs }))
-      .sort((a, b) => b.at - a.at)
-      .slice(KEEP_BUNDLES);
-    for (const entry of stale) rmSync(join(root, entry.name), { recursive: true, force: true });
-    return bundled;
-  }
-
-  async function remotion(job: CompositionJob): Promise<void> {
-    const serveUrl = await remotionBundle(job);
-    job.signal?.throwIfAborted();
-    const { makeCancelSignal, renderMedia, selectComposition } = await import('@remotion/renderer');
-    const { cancel, cancelSignal } = makeCancelSignal();
-    job.signal?.addEventListener('abort', cancel, { once: true });
-    const inputProps = job.data as unknown as Record<string, unknown>;
-    const shared = { serveUrl, inputProps, browserExecutable: shell ?? null, logLevel: 'error' as const };
-    try {
-      const composition = await selectComposition({ ...shared, id: 'main' });
-      await renderMedia({
-        ...shared,
-        composition,
-        codec: 'h264',
-        outputLocation: job.path,
-        concurrency: WORKERS,
-        enforceAudioTrack: true,
-        cancelSignal,
-      });
-    } catch (error) {
-      if (job.signal?.aborted) throw new Error('Ejecución cancelada.');
-      throw new Error(`Remotion no pudo renderizar: ${(error as Error).message.slice(0, 800)}`);
-    } finally {
-      job.signal?.removeEventListener('abort', cancel);
-    }
-  }
-
   return async (job) => {
     mkdirSync(dirname(job.path), { recursive: true });
-    if (job.engine === 'remotion') await remotion(job);
-    else await hyperframes(job);
+    await hyperframes(job);
     await ensureAudio(config.ffmpegPath, job.path, job.signal);
   };
 }

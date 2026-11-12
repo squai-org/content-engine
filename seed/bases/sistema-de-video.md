@@ -1,6 +1,6 @@
 # Sistema de video
 
-Reglas para los reels. El productor escribe las escenas y elige un template de reel; el servidor las anima con el motor de ese template y exporta el video.
+Reglas para los reels. El productor escribe las escenas y elige un template de reel; el servidor las anima y exporta el video.
 
 ## Formato
 
@@ -8,15 +8,12 @@ Reglas para los reels. El productor escribe las escenas y elige un template de r
 | --- | --- | --- | --- |
 | Instagram Reels | 1080×1920, 9:16 | 15 a 40 segundos | MP4, H.264, 30 fps, AAC |
 
-## Templates y motores
+## Templates
 
-| Template | Motor | Movimiento | Úsalo para |
-| --- | --- | --- | --- |
-| `reel-hyperframes.html` | HyperFrames (HTML + GSAP) | Palabras con rebote, escenas que salen hacia arriba, fondo y formas continuos durante todo el video | La mayoría de los reels. Es el template por defecto |
-| `reel-remotion.tsx` | Remotion (React) | Física de resortes y transiciones entre escenas: deslizar y barrido | Piezas con ritmo marcado: listas, pasos, antes y después |
-| `reel-squai.html` | CSS | Entradas simples y cambio por corte | Mensajes sobrios o muy cortos |
-
-Todos reciben las mismas escenas. Cambiar de template no cambia el guion.
+| Template | Úsalo para |
+| --- | --- |
+| `reel-hyperframes.html` | Reels animados desde el guion, sin grabación |
+| `video-hyperframes.html` | Reels sobre un video grabado, con subtítulos y animaciones |
 
 ## Zonas seguras
 
@@ -57,4 +54,19 @@ Sigue el servicio de la pieza: Grow teal, Learn gold, One periwinkle. Texto siem
 
 ## Video grabado
 
-Si la pieza necesita video grabado, súbelo desde la pieza. El archivo subido reemplaza al video animado.
+Cuando la pieza trae una grabación, el servidor la convierte a 1080×1920, la transcribe y el productor planifica la edición con la skill edicion-video. El template es `video-hyperframes.html`.
+
+| Elemento | Regla |
+| --- | --- |
+| Duración | Entre 15 y 90 segundos después del recorte. La grabación se lee hasta 3 minutos |
+| Título inicial | Primeros 3 segundos, arriba. Máximo 9 palabras, una frase resaltada |
+| Subtítulos | Siempre. Hasta 3 palabras por línea, centrados bajo la mitad de la pantalla, fuera de la zona del pie. Cada palabra se enciende al decirse |
+| Resaltado | Una o dos palabras por frase, en el color de resaltado del servicio |
+| Etiqueta | 1 a 3 palabras sobre el concepto que se acaba de nombrar. Dura unos 2 segundos |
+| Nota a mano | Comentario breve. Máximo dos por video |
+| Acercamiento | En afirmaciones fuertes o cambios de idea. Suave, 14 % |
+| Ritmo | Una animación cada 5 a 8 segundos. Nunca dos a la vez |
+| Cierre | Últimos 2,6 segundos: tarjeta con la llamada a la acción y `squai.io` |
+| Audio | Se conserva la voz original |
+
+Para publicar un video ya editado por fuera, usa «Subir video propio» en la pieza: se publica tal cual.

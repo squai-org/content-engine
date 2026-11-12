@@ -1,24 +1,30 @@
 import { spawn } from 'node:child_process';
-import { existsSync, readdirSync, rmSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { basename, join } from 'node:path';
 import type { Config } from './config.ts';
 import type { Monitor } from './monitor.ts';
 import type { Job, Store } from './db.ts';
 import {
+  buildEdit,
+  type EditPlan,
   FORMATS,
   type Item,
+  MOMENT_KINDS,
   normalizeFormat,
+  normalizePlan,
+  planViolations,
   proposalViolations,
   sceneSeconds,
   type Slide,
+  type Transcript,
 } from './domain.ts';
 import type { Publish } from './publisher.ts';
 import {
   buildSlideHtml,
   type Composer,
   compositionData,
+  type MediaTools,
   type Renderer,
-  type VideoRenderer,
 } from './render.ts';
 import type { Workspace } from './workspace.ts';
 
@@ -43,8 +49,8 @@ export type Context = {
   workspace: Workspace;
   executor: Executor;
   renderer: Renderer;
-  video: VideoRenderer;
   compose: Composer;
+  media: MediaTools;
   publish: Publish;
   monitor: Monitor;
 };
@@ -92,6 +98,58 @@ const REVISION_SCHEMA = {
   additionalProperties: false,
 };
 
+const INDEX = { type: 'integer', minimum: 0 };
+const EDIT_PROPERTIES = {
+  copy: { type: 'string' },
+  template: { type: 'string' },
+  script: { type: 'string' },
+  trim: {
+    type: 'object',
+    properties: { start: { type: 'number' }, end: { type: 'number' } },
+    required: ['start', 'end'],
+    additionalProperties: false,
+  },
+  fixes: {
+    type: 'array',
+    items: {
+      type: 'object',
+      properties: { from: INDEX, to: INDEX, text: { type: 'string' } },
+      required: ['from', 'to', 'text'],
+      additionalProperties: false,
+    },
+  },
+  emphasis: { type: 'array', items: INDEX },
+  hook: { type: 'string' },
+  cta: { type: 'string' },
+  moments: {
+    type: 'array',
+    items: {
+      type: 'object',
+      properties: {
+        word: INDEX,
+        seconds: { type: 'number' },
+        kind: { type: 'string', enum: MOMENT_KINDS },
+        text: { type: 'string' },
+      },
+      required: ['word', 'seconds', 'kind', 'text'],
+      additionalProperties: false,
+    },
+  },
+};
+const EDIT_REQUIRED = ['copy', 'template', 'script', 'trim', 'fixes', 'emphasis', 'hook', 'cta', 'moments'];
+const EDIT_SCHEMA = {
+  type: 'object',
+  properties: EDIT_PROPERTIES,
+  required: EDIT_REQUIRED,
+  additionalProperties: false,
+};
+const EDIT_REVISION_SCHEMA = {
+  type: 'object',
+  properties: { ...EDIT_PROPERTIES, learning: { type: 'string' } },
+  required: [...EDIT_REQUIRED, 'learning'],
+  additionalProperties: false,
+};
+
 const PLAN_SCHEMA = {
   type: 'object',
   properties: {
@@ -131,6 +189,7 @@ const PLAN_SCHEMA = {
 
 type Proposal = { copy: string; template: string; slides: Slide[]; script: string };
 type Revision = Proposal & { learning: string };
+type EditProposal = EditPlan & { copy: string; template: string; script: string; learning?: string };
 type Plan = { items: Record<string, string>[]; research: string };
 
 type Block = {
@@ -307,10 +366,10 @@ const FORMAT_RULES = [
   '- Si el formato no es reel, deja script vacío.',
 ].join('\n');
 
-function templatesBrief(ctx: Context, item: Item): string {
+function templatesBrief(ctx: Context, item: Item, footage = false): string {
   const names = ctx.workspace
-    .templatesFor(item.format)
-    .map((template) => (template.engine === 'nativo' ? template.name : `${template.name} (${template.engine})`));
+    .templatesFor(item.format, footage)
+    .map((template) => template.name);
   return names.length ? names.join(', ') : 'ninguno';
 }
 
@@ -334,6 +393,51 @@ function revisePrompt(ctx: Context, item: Item): string {
     `Anotaciones:\n${item.notes}`,
     `Templates disponibles en templates/ para este formato: ${templatesBrief(ctx, item)}.`,
     FORMAT_RULES,
+    'Cambia solo lo que piden las anotaciones. En learning resume en una frase la regla general que se aprende, o deja vacío si no hay.',
+    'Devuelve solo el JSON pedido.',
+  ].join('\n\n');
+}
+
+const EDIT_RULES = [
+  'Reglas de la edición:',
+  '- Aplica la skill edicion-video y lee bases/sistema-de-video.md.',
+  '- La transcripción trae una palabra por línea: índice, segundo de inicio y texto. Los índices de fixes, emphasis y moments son los de esa lista.',
+  '- trim: segundo donde empieza y termina el video final. Quita silencios y arranques en falso del inicio y del final.',
+  '- fixes: corrige palabras mal transcritas, nombres propios y puntuación. Cada fix reemplaza las palabras de from a to (incluidas) por text. No reescribas lo que la persona dijo.',
+  '- emphasis: índices de las palabras que se resaltan en los subtítulos.',
+  '- hook: título que abre el video, máximo 9 palabras, con una frase entre [[ ]].',
+  '- moments: animaciones dentro del video, ancladas a la palabra donde aparecen. keyword muestra una etiqueta grande con text, note una anotación a mano con text, zoom acerca la imagen y lleva text vacío.',
+  '- cta: la llamada a la acción del cierre, en una línea.',
+  '- script: la transcripción corregida completa. copy: el texto de la publicación.',
+].join('\n');
+
+function transcriptBrief(transcript: Transcript): string {
+  const lines = transcript.words.map((word, index) => `${index}\t${word.start.toFixed(2)}\t${word.text}`);
+  return `Duración del video: ${transcript.duration.toFixed(1)} s.\nTranscripción (índice, inicio, palabra):\n${lines.join('\n')}`;
+}
+
+function editPrompt(ctx: Context, item: Item, transcript: Transcript): string {
+  return [
+    'Planifica la edición de este reel de Instagram a partir del video grabado.',
+    'Lee todo bases/ antes de escribir. Aplica las skills copy-instagram y edicion-video.',
+    `Pieza:\n${itemBrief(item)}`,
+    transcriptBrief(transcript),
+    `Templates disponibles en templates/ para video grabado: ${templatesBrief(ctx, item, true)}.`,
+    EDIT_RULES,
+    'Devuelve solo el JSON pedido.',
+  ].join('\n\n');
+}
+
+function editRevisePrompt(ctx: Context, item: Item, transcript: Transcript): string {
+  return [
+    'Aplica las anotaciones del revisor humano a la edición de este reel grabado.',
+    'Lee todo bases/ antes de escribir. Aplica la skill revision-ajustes.',
+    `Pieza:\n${itemBrief(item)}`,
+    transcriptBrief(transcript),
+    `Edición actual:\n${JSON.stringify({ copy: item.copy, template: item.spec?.template, script: item.spec?.script, ...item.spec?.edit }, null, 2)}`,
+    `Anotaciones:\n${item.notes}`,
+    `Templates disponibles en templates/ para video grabado: ${templatesBrief(ctx, item, true)}.`,
+    EDIT_RULES,
     'Cambia solo lo que piden las anotaciones. En learning resume en una frase la regla general que se aprende, o deja vacío si no hay.',
     'Devuelve solo el JSON pedido.',
   ].join('\n\n');
@@ -428,11 +532,99 @@ async function propose<T extends Proposal>(
   throw new Error(`La propuesta incumple reglas: ${problems.join(' ')}`);
 }
 
+const MATERIAL = 'material';
+
+async function prepareFootage(run: Run, item: Item): Promise<{ video: string; transcript: Transcript }> {
+  const { ctx } = run;
+  const dir = join(ctx.config.dataDir, 'media', item.id);
+  const video = `${item.id}/${MATERIAL}.mp4`;
+  const videoPath = join(dir, `${MATERIAL}.mp4`);
+  const transcriptPath = join(dir, `${MATERIAL}.json`);
+  if (item.footage !== video) {
+    log(run, 'step', 'Preparando el video', 'Se convierte a 1080×1920, 30 fps.');
+    rmSync(transcriptPath, { force: true });
+    const source = join(ctx.config.dataDir, 'media', item.footage);
+    const duration = await ctx.media.normalize(source, videoPath, run.signal);
+    writeFileSync(transcriptPath, JSON.stringify({ duration, words: null }));
+    ctx.store.updateItem(item.id, { footage: video });
+    rmSync(source, { force: true });
+  }
+  const saved = JSON.parse(readFileSync(transcriptPath, 'utf8')) as { duration: number; words: Transcript['words'] | null };
+  if (!saved.words) {
+    log(run, 'step', 'Transcribiendo el audio', 'Whisper local, palabra por palabra.');
+    saved.words = await ctx.media.transcribe(videoPath, run.signal);
+    writeFileSync(transcriptPath, JSON.stringify(saved));
+    log(run, 'step', 'Transcripción lista', `${saved.words.length} palabras`);
+  }
+  if (!saved.words.length) throw new Error('No se detectó voz en el video. Los subtítulos necesitan audio hablado.');
+  return { video, transcript: { duration: saved.duration, words: saved.words } };
+}
+
+async function editFootage(run: Run, item: Item, revising: boolean): Promise<{ updated: Item; learning: string }> {
+  const { ctx } = run;
+  const { video, transcript } = await prepareFootage(run, item);
+  const prompt = revising ? editRevisePrompt(ctx, item, transcript) : editPrompt(ctx, item, transcript);
+  const schema = revising ? EDIT_REVISION_SCHEMA : EDIT_SCHEMA;
+  let feedback = '';
+  let problems: string[] = [];
+  let output: EditProposal | null = null;
+  let plan: EditPlan | null = null;
+  for (let attempt = 0; attempt < MAX_ATTEMPTS && !plan; attempt += 1) {
+    output = await ask<EditProposal>(run, prompt + feedback, schema);
+    const candidate = normalizePlan(output, transcript);
+    problems = planViolations(candidate, output.copy ?? '');
+    if (!problems.length) plan = candidate;
+    else {
+      log(run, 'step', 'La edición incumple reglas', problems.join('\n'));
+      feedback = `\n\nTu respuesta anterior incumplió estas reglas, corrígelas:\n- ${problems.join('\n- ')}`;
+    }
+  }
+  if (!plan || !output) throw new Error(`La edición incumple reglas: ${problems.join(' ')}`);
+
+  const template = ctx.workspace.pickTemplate(output.template ?? '', 'reel', true);
+  const built = buildEdit(transcript, plan);
+  const iteration = item.iteration + 1;
+  const mediaDir = join(ctx.config.dataDir, 'media');
+  const assets = [`${item.id}/v${iteration}.mp4`];
+  run.signal?.throwIfAborted();
+  log(
+    run,
+    'step',
+    'Renderizando video',
+    `${Math.round(built.duration)} s · ${built.edit.captions.length} subtítulos · ${built.edit.moments.length} animaciones · ${template.name}`,
+  );
+  await ctx.compose({
+    template: ctx.workspace.read('templates', template.name) as string,
+    data: {
+      service: item.service,
+      duration: built.duration,
+      scenes: [],
+      footage: { src: '', start: plan.trim.start },
+      edit: built.edit,
+    },
+    width: template.width,
+    height: template.height,
+    path: join(mediaDir, assets[0]),
+    footage: join(mediaDir, video),
+    signal: run.signal,
+  });
+  pruneMedia(join(mediaDir, item.id), assets);
+  const updated = ctx.store.updateItem(item.id, {
+    copy: output.copy,
+    spec: { template: template.name, slides: [], script: output.script ?? '', edit: plan },
+    assets,
+    iteration,
+    status: 'revision',
+    error: null,
+  });
+  return { updated, learning: output.learning?.trim() ?? '' };
+}
+
 function pruneMedia(dir: string, keep: string[]): void {
   if (!existsSync(dir)) return;
   const names = new Set(keep.map((asset) => basename(asset)));
   for (const name of readdirSync(dir)) {
-    if (!names.has(name)) rmSync(join(dir, name), { force: true });
+    if (!names.has(name) && !name.startsWith(MATERIAL)) rmSync(join(dir, name), { force: true });
   }
 }
 
@@ -447,41 +639,17 @@ async function applyProposal(run: Run, item: Item, proposal: Proposal): Promise<
     const html = ctx.workspace.read('templates', template.name) as string;
     const tokens = ctx.workspace.tokens();
     const total = proposal.slides.length;
-    const build = (slide: Slide, index: number, seconds = 0) =>
-      buildSlideHtml(html, tokens, slide, index, total, {
-        service: item.service,
-        seconds: String(seconds),
-      });
+    const build = (slide: Slide, index: number) =>
+      buildSlideHtml(html, tokens, slide, index, total, { service: item.service });
     templateName = template.name;
     run.signal?.throwIfAborted();
-    if (item.format === 'reel' && template.engine !== 'nativo') {
+    if (item.format === 'reel') {
       assets = [`${item.id}/v${iteration}.mp4`];
       const data = compositionData(item.service, proposal.slides, sceneSeconds);
-      log(
-        run,
-        'step',
-        'Renderizando video',
-        `${total} escenas · ${Math.round(data.duration)} s · ${template.name} · ${template.engine}`,
-      );
+      log(run, 'step', 'Renderizando video', `${total} escenas · ${Math.round(data.duration)} s · ${template.name}`);
       await ctx.compose({
-        engine: template.engine,
         template: html,
         data,
-        width: template.width,
-        height: template.height,
-        path: join(mediaDir, assets[0]),
-        signal: run.signal,
-      });
-    } else if (item.format === 'reel') {
-      assets = [`${item.id}/v${iteration}.mp4`];
-      const scenes = proposal.slides.map((slide, index) => {
-        const seconds = sceneSeconds(slide);
-        return { html: build(slide, index, seconds), seconds };
-      });
-      const length = scenes.reduce((sum, scene) => sum + scene.seconds, 0);
-      log(run, 'step', 'Renderizando video', `${total} escenas · ${Math.round(length)} s · ${template.name}`);
-      await ctx.video({
-        scenes,
         width: template.width,
         height: template.height,
         path: join(mediaDir, assets[0]),
@@ -522,8 +690,14 @@ async function produce(run: Run): Promise<Item[]> {
   const item = requireItem(ctx, job);
   if (item.status !== 'idea' && item.status !== 'produciendo') return [];
   ctx.store.updateItem(item.id, { status: 'produciendo' });
-  const proposal = await propose<Proposal>(run, item, producePrompt(ctx, item), PROPOSAL_SCHEMA);
-  const updated = await applyProposal(run, item, proposal);
+  const updated =
+    item.format === 'reel' && item.footage
+      ? (await editFootage(run, item, false)).updated
+      : await applyProposal(
+          run,
+          item,
+          await propose<Proposal>(run, item, producePrompt(ctx, item), PROPOSAL_SCHEMA),
+        );
   ctx.store.addEvent(item.id, 'propuesta', `Versión ${updated.iteration}`);
   log(run, 'step', 'Propuesta lista', `Versión ${updated.iteration}`);
   return [updated];
@@ -533,12 +707,19 @@ async function revise(run: Run): Promise<Item[]> {
   const { ctx, job } = run;
   const item = requireItem(ctx, job);
   if (item.status !== 'ajustes') return [];
-  const revision = await propose<Revision>(run, item, revisePrompt(ctx, item), REVISION_SCHEMA);
-  const updated = await applyProposal(run, item, revision);
+  let updated: Item;
+  let learning: string;
+  if (item.format === 'reel' && item.footage) {
+    ({ updated, learning } = await editFootage(run, item, true));
+  } else {
+    const revision = await propose<Revision>(run, item, revisePrompt(ctx, item), REVISION_SCHEMA);
+    updated = await applyProposal(run, item, revision);
+    learning = revision.learning?.trim() ?? '';
+  }
   ctx.store.addEvent(item.id, 'ajustes', item.notes);
   ctx.store.updateItem(item.id, { notes: '' });
-  if (revision.learning?.trim()) ctx.workspace.appendLearning(revision.learning);
-  log(run, 'step', 'Ajustes aplicados', revision.learning?.trim() ?? '');
+  if (learning) ctx.workspace.appendLearning(learning);
+  log(run, 'step', 'Ajustes aplicados', learning);
   return [{ ...updated, notes: '' }];
 }
 

@@ -14,7 +14,7 @@ import {
 import { createApp } from '../src/server/app.ts';
 import { loadConfig } from '../src/server/config.ts';
 import { createStore } from '../src/server/db.ts';
-import { canHumanMove, proposalViolations, sceneSeconds } from '../src/server/domain.ts';
+import { buildEdit, canHumanMove, normalizePlan, proposalViolations, sceneSeconds } from '../src/server/domain.ts';
 import { fetchInsights } from '../src/server/insights.ts';
 import {
   cancelJob,
@@ -36,9 +36,12 @@ import {
   type CompositionJob,
   compositionData,
   type RenderJob,
-  type VideoJob,
 } from '../src/server/render.ts';
 import { createWorkspace, syncSeed } from '../src/server/workspace.ts';
+
+const transcript = 'Sabes qué es un agente Es un proceso con inteligencia artificial la gente decide sola'
+  .split(' ')
+  .map((text, index) => ({ text, start: 1 + index, end: 1.8 + index }));
 
 const slide = { kicker: 'Anti-humo', title: 'La IA no piensa por ti', body: 'Genera volumen.' };
 const proposal = {
@@ -52,7 +55,6 @@ function setup(executor: Executor, env: Record<string, string> = {}) {
   const dataDir = mkdtempSync(join(tmpdir(), 'ce-'));
   const rendered: RenderJob[] = [];
   const published: Publication[] = [];
-  const videos: VideoJob[] = [];
   const compositions: CompositionJob[] = [];
   const config = loadConfig({
     ADMIN_PASSWORD: 'clave',
@@ -70,11 +72,12 @@ function setup(executor: Executor, env: Record<string, string> = {}) {
     renderer: async (jobs) => {
       rendered.push(...jobs);
     },
-    video: async (job) => {
-      videos.push(job);
-    },
     compose: async (job) => {
       compositions.push(job);
+    },
+    media: {
+      normalize: async () => 20,
+      transcribe: async () => transcript,
     },
     publish: async (_account, publication) => {
       published.push(publication);
@@ -83,7 +86,7 @@ function setup(executor: Executor, env: Record<string, string> = {}) {
     monitor: createMonitor(config, store),
   };
   ctx.monitor.stop();
-  return { ctx, rendered, published, videos, compositions };
+  return { ctx, rendered, published, compositions };
 }
 
 async function login(app: ReturnType<typeof createApp>): Promise<string> {
@@ -582,33 +585,6 @@ test('regenerar una propuesta y reejecutar una ejecución', async () => {
   assert.equal(revise.status, 400);
 });
 
-test('un reel se produce como video con una escena por lámina', async () => {
-  const prompts: string[] = [];
-  const scenes = [slide, { ...slide, title: 'Dos' }, { ...slide, title: 'Tres [[clave]]' }];
-  const { ctx, videos, rendered } = setup(async ({ prompt }) => {
-    prompts.push(prompt);
-    return prompts.length === 1
-      ? { ...proposal, slides: [], script: 'Guion.' }
-      : { ...proposal, template: 'reel-squai.html', slides: scenes, script: 'Guion.' };
-  });
-  const item = ctx.store.createItem({ title: 'x', format: 'reel', service: 'One' });
-  ctx.store.enqueue('produce', 'productor', item.id);
-  await workOnce(ctx);
-  assert.match(prompts[1], /entre 3 y 9 escenas/);
-  const produced = ctx.store.getItem(item.id);
-  assert.equal(produced?.status, 'revision');
-  assert.equal(produced?.spec?.template, 'reel-squai.html');
-  assert.deepEqual(produced?.assets, [`${item.id}/v1.mp4`]);
-  assert.equal(rendered.length, 0);
-  assert.equal(videos.length, 1);
-  assert.equal(videos[0].width, 1080);
-  assert.equal(videos[0].height, 1920);
-  assert.equal(videos[0].scenes.length, 3);
-  assert.equal(videos[0].scenes[0].seconds, sceneSeconds(slide));
-  assert.match(videos[0].scenes[0].html, /data-service="One"/);
-  assert.match(videos[0].scenes[2].html, /Tres <mark>clave<\/mark>/);
-});
-
 test('resaltado, anotación, fuente y contexto en la lámina', () => {
   const html = buildSlideHtml(
     '{{title}}|{{body}}|{{note}}|{{source}}|{{service}}|{{seconds}}',
@@ -671,6 +647,14 @@ test('la semilla actualiza archivos intactos y respeta los editados', () => {
   rmSync(join(root, 'bases/c.md'));
   assert.deepEqual(syncSeed(root, seed), []);
   assert.equal(existsSync(join(root, 'bases/c.md')), false);
+
+  rmSync(join(seed, 'bases/a.md'));
+  rmSync(join(seed, 'bases/b.md'));
+  syncSeed(root, seed);
+  assert.equal(existsSync(join(root, 'bases/a.md')), false);
+  assert.equal(readFileSync(join(root, 'bases/b.md'), 'utf8'), 'editado');
+  writeFileSync(join(seed, 'bases/a.md'), 'a2');
+  writeFileSync(join(seed, 'bases/b.md'), 'b2');
 
   const legacy = join(base, 'legacy');
   mkdirSync(join(legacy, 'bases'), { recursive: true });
@@ -815,82 +799,69 @@ test('analítica de instagram tolera la falta de permisos', async () => {
   assert.match(insights.warning, /instagram_manage_insights/);
 });
 
-test('un reel con template de hyperframes o remotion se compone con ese motor', async () => {
-  const scenes = [slide, { ...slide, title: 'Dos' }, { ...slide, title: 'Tres <[[clave]]>' }];
-  const templates = ['reel-remotion.tsx (remotion)', 'no-existe.html'];
-  const { ctx, compositions, videos } = setup(async () => ({
-    ...proposal,
-    template: templates.shift() as string,
-    slides: scenes,
-    script: 'Guion.',
-  }));
+test('un reel se compone con hyperframes, una escena por lámina', async () => {
   const prompts: string[] = [];
-  const executor = ctx.executor;
-  ctx.executor = (input) => {
-    prompts.push(input.prompt);
-    return executor(input);
-  };
-  const first = ctx.store.createItem({ title: 'x', format: 'reel', service: 'Grow' });
-  ctx.store.enqueue('produce', 'productor', first.id);
+  const scenes = [slide, { ...slide, title: 'Dos' }, { ...slide, title: 'Tres <[[clave]]>' }];
+  const { ctx, compositions, rendered } = setup(async ({ prompt }) => {
+    prompts.push(prompt);
+    return prompts.length === 1
+      ? { ...proposal, slides: [], script: 'Guion.' }
+      : { ...proposal, template: 'no-existe.html', slides: scenes, script: 'Guion.' };
+  });
+  const item = ctx.store.createItem({ title: 'x', format: 'reel', service: 'One' });
+  ctx.store.enqueue('produce', 'productor', item.id);
   await workOnce(ctx);
-  assert.match(prompts[0], /reel-hyperframes\.html \(hyperframes\), reel-remotion\.tsx \(remotion\), reel-squai\.html/);
-  assert.equal(videos.length, 0);
-  assert.equal(compositions[0].engine, 'remotion');
-  assert.match(compositions[0].template, /TransitionSeries/);
-  assert.equal(compositions[0].data.service, 'Grow');
-  assert.equal(compositions[0].data.scenes.length, 3);
-  assert.equal(compositions[0].data.scenes[1].start, sceneSeconds(slide));
-  assert.equal(compositions[0].path.endsWith(`${first.id}/v1.mp4`), true);
-  assert.equal(ctx.store.getItem(first.id)?.spec?.template, 'reel-remotion.tsx');
-
-  const second = ctx.store.createItem({ title: 'y', format: 'reel' });
-  ctx.store.enqueue('produce', 'productor', second.id);
-  await workOnce(ctx);
-  assert.equal(compositions[1].engine, 'hyperframes');
-  const html = buildCompositionHtml(compositions[1].template, '', compositions[1].data);
+  assert.match(prompts[0], /para este formato: reel-hyperframes\.html\./);
+  assert.match(prompts[1], /entre 3 y 9 escenas/);
+  const produced = ctx.store.getItem(item.id);
+  assert.equal(produced?.status, 'revision');
+  assert.equal(produced?.spec?.template, 'reel-hyperframes.html');
+  assert.deepEqual(produced?.assets, [`${item.id}/v1.mp4`]);
+  assert.equal(rendered.length, 0);
+  const [job] = compositions;
+  assert.equal(job.width, 1080);
+  assert.equal(job.height, 1920);
+  assert.equal(job.data.service, 'One');
+  assert.equal(job.data.scenes.length, 3);
+  assert.equal(job.data.scenes[1].start, sceneSeconds(slide));
+  const html = buildCompositionHtml(job.template, '', job.data);
   assert.match(html, /data-duration="\d+(\.\d)?"/);
   assert.match(html, /"title":"Tres \\u003c\[\[clave\]\]>"/);
   assert.doesNotMatch(html, /\{\{data\}\}/);
-
   const data = compositionData('One', [slide, slide], () => 2.5);
   assert.equal(data.duration, 5);
   assert.deepEqual(
     data.scenes.map((scene) => scene.start),
     [0, 2.5],
   );
+  assert.deepEqual(ctx.workspace.templatesFor('reel').map((template) => template.name), ['reel-hyperframes.html']);
+  assert.equal(ctx.workspace.templatesFor('carrusel').some((template) => template.engine !== 'nativo'), false);
 });
 
-test('api: vista previa y muestra de templates con motor', async () => {
-  const { ctx, compositions, videos } = setup(async () => proposal);
+test('api: vista previa con controles y muestra de un template de video', async () => {
+  const { ctx, compositions } = setup(async () => proposal);
   const app = createApp(ctx);
   const headers = { cookie: await login(app) };
   const read = (name: string) => readFileSync(join(ctx.workspace.root, 'templates', name), 'utf8');
   const post = (path: string, content: string) =>
     app.request(path, { method: 'POST', headers, body: JSON.stringify({ content, service: 'One' }) });
-
-  const hyper = (await (await post('/api/templates/preview', read('reel-hyperframes.html'))).json()) as {
+  const preview = (await (await post('/api/templates/preview', read('reel-hyperframes.html'))).json()) as {
     engine: string;
+    duration: number;
     slides: string[];
   };
-  assert.equal(hyper.engine, 'hyperframes');
-  assert.equal(hyper.slides.length, 1);
-  assert.match(hyper.slides[0], /<head><script>window\.__preview=true<\/script>/);
-  assert.doesNotMatch(hyper.slides[0], /cdn\.jsdelivr\.net/);
-  assert.match(hyper.slides[0], /GSAP 3\.15\.0/);
-  const remotion = (await (await post('/api/templates/preview', read('reel-remotion.tsx'))).json()) as {
-    engine: string;
-    slides: string[];
-  };
-  assert.deepEqual([remotion.engine, remotion.slides.length], ['remotion', 0]);
-  assert.equal(ctx.workspace.templatesFor('reel').length, 3);
+  assert.equal(preview.engine, 'hyperframes');
+  assert.ok(preview.duration > 10);
+  assert.equal(preview.slides.length, 1);
+  assert.doesNotMatch(preview.slides[0], /cdn\.jsdelivr\.net/);
+  assert.match(preview.slides[0], /GSAP 3\.15\.0/);
+  assert.match(preview.slides[0], /addEventListener\("message"/);
 
-  const sample = await post('/api/templates/sample', read('reel-remotion.tsx'));
+  const sample = await post('/api/templates/sample', read('reel-hyperframes.html'));
   const { url } = (await sample.json()) as { url: string };
   assert.match(url, /^\/media\/_muestras\/[0-9a-f]{16}\.mp4$/);
   assert.equal(compositions.length, 1);
   assert.equal(compositions[0].data.scenes.length, 4);
-  await post('/api/templates/sample', read('reel-squai.html'));
-  assert.equal(videos.length, 1);
   assert.equal((await post('/api/templates/sample', read('editorial.html'))).status, 400);
 });
 
@@ -905,4 +876,139 @@ test('encuentra el headless shell de playwright', () => {
     findHeadlessShell([root]),
     join(root, 'chromium_headless_shell-1243', 'chrome-headless-shell-linux64', 'chrome-headless-shell'),
   );
+});
+
+test('plan de edición: correcciones, recorte, subtítulos y momentos', () => {
+  const source = { duration: 20, words: transcript };
+  const plan = normalizePlan(
+    {
+      trim: { start: 0.5, end: 15 },
+      fixes: [
+        { from: 0, to: 0, text: '¿Sabes' },
+        { from: 11, to: 12, text: 'el agente' },
+        { from: 99, to: 3, text: 'x' },
+      ],
+      emphasis: [4, 12, 500],
+      hook: '¿Qué es un [[agente]]?',
+      cta: 'Inscríbete',
+      moments: [
+        { word: 8, seconds: 9, kind: 'keyword', text: 'IA' },
+        { word: 10, seconds: 2, kind: 'zoom', text: 'sobra' },
+        { word: 2, seconds: 2, kind: 'baile' as never, text: 'x' },
+      ],
+    },
+    source,
+  );
+  assert.equal(plan.fixes.length, 2);
+  assert.deepEqual(plan.emphasis, [4, 12, 14]);
+  assert.deepEqual(plan.moments, [
+    { word: 8, seconds: 3, kind: 'keyword', text: 'IA' },
+    { word: 10, seconds: 2, kind: 'zoom', text: '' },
+  ]);
+  const { duration, edit } = buildEdit(source, plan);
+  assert.equal(duration, 14.5);
+  const text = edit.words.map((word) => word.text).join(' ');
+  assert.equal(text, '¿Sabes qué es un agente Es un proceso con inteligencia artificial el agente decide');
+  assert.equal(edit.words[0].start, 0.5);
+  assert.deepEqual(
+    edit.words.filter((word) => word.strong).map((word) => word.text),
+    ['agente', 'el', 'agente'],
+  );
+  assert.ok(edit.captions.every((caption) => caption.words.length <= 3));
+  assert.deepEqual(edit.captions.flatMap((caption) => caption.words), edit.words.map((_, index) => index));
+  assert.deepEqual(edit.moments.map((moment) => [moment.kind, moment.start]), [
+    ['keyword', 8.5],
+    ['zoom', 10.5],
+  ]);
+  assert.equal(normalizePlan({ trim: { start: 5, end: 6 } }, source).trim.end, 20);
+});
+
+test('un reel con video grabado se transcribe, se planifica y se compone', async () => {
+  const prompts: string[] = [];
+  const answers = [
+    { hook: '' },
+    { hook: '¿Qué es un [[agente]]?' },
+    { hook: 'Agentes, [[sin humo]]', learning: 'El hook no pregunta.' },
+  ];
+  const { ctx, compositions } = setup(async ({ prompt }) => {
+    prompts.push(prompt);
+    return {
+      copy: 'Un agente decide solo.',
+      template: 'video-hyperframes.html',
+      script: 'Guion corregido.',
+      trim: { start: 0.5, end: 15 },
+      fixes: [{ from: 11, to: 12, text: 'el agente' }],
+      emphasis: [4],
+      cta: 'Inscríbete',
+      moments: [{ word: 8, seconds: 2, kind: 'keyword', text: 'IA' }],
+      ...answers.shift(),
+    };
+  });
+  const app = createApp(ctx);
+  const headers = { cookie: await login(app) };
+  const item = ctx.store.createItem({ title: 'Agentes', format: 'reel', service: 'One' });
+  const post = ctx.store.createItem({ title: 'Post', format: 'post' });
+  const upload = (id: string, name: string) =>
+    app.request(`/api/items/${id}/footage?name=${name}`, { method: 'POST', headers, body: 'video' });
+  assert.equal((await upload(post.id, 'a.mov')).status, 400);
+  assert.equal((await upload(item.id, 'a.txt')).status, 400);
+  const uploaded = await upload(item.id, 'KGBQ2465.MOV');
+  assert.equal(uploaded.status, 200);
+  assert.equal(ctx.store.getItem(item.id)?.footage, `${item.id}/material-original.mov`);
+  assert.equal(ctx.store.getItem(item.id)?.status, 'produciendo');
+
+  await workOnce(ctx);
+  const produced = ctx.store.getItem(item.id);
+  assert.equal(produced?.status, 'revision');
+  assert.equal(produced?.footage, `${item.id}/material.mp4`);
+  assert.equal(existsSync(join(ctx.config.dataDir, 'media', item.id, 'material-original.mov')), false);
+  assert.equal(prompts.length, 2);
+  assert.match(prompts[0], /skills copy-instagram y edicion-video/);
+  assert.match(prompts[0], /Duración del video: 20\.0 s/);
+  assert.match(prompts[0], /\n4\t5\.00\tagente\n/);
+  assert.match(prompts[0], /para video grabado: video-hyperframes\.html\./);
+  assert.match(prompts[1], /Falta hook/);
+  const [job] = compositions;
+  assert.equal(job.footage, join(ctx.config.dataDir, 'media', item.id, 'material.mp4'));
+  assert.deepEqual(job.data.footage, { src: '', start: 0.5 });
+  assert.equal(job.data.duration, 14.5);
+  assert.equal(job.data.edit?.hook, '¿Qué es un [[agente]]?');
+  assert.match(job.data.edit?.words.map((word) => word.text).join(' ') ?? '', /el agente decide$/);
+  assert.equal(produced?.spec?.template, 'video-hyperframes.html');
+  assert.equal(produced?.spec?.edit?.cta, 'Inscríbete');
+  const steps = ctx.store
+    .listJobEvents(ctx.store.latestJob(item.id)?.id as string)
+    .filter((event) => event.kind === 'step')
+    .map((event) => event.name);
+  assert.deepEqual(steps, [
+    'Preparando el video',
+    'Transcribiendo el audio',
+    'Transcripción lista',
+    'La edición incumple reglas',
+    'Renderizando video',
+    'Propuesta lista',
+  ]);
+
+  await app.request(`/api/items/${item.id}`, {
+    method: 'PATCH',
+    headers,
+    body: JSON.stringify({ status: 'ajustes', notes: 'El hook no debe ser pregunta.' }),
+  });
+  await workOnce(ctx);
+  assert.match(prompts[2], /Edición actual:/);
+  assert.match(prompts[2], /El hook no debe ser pregunta/);
+  assert.equal(compositions[1].data.edit?.hook, 'Agentes, [[sin humo]]');
+  assert.equal(ctx.store.getItem(item.id)?.iteration, 2);
+  assert.equal(existsSync(join(ctx.config.dataDir, 'media', item.id, 'material.json')), true);
+  assert.match(readFileSync(join(ctx.workspace.root, 'bases/aprendizajes.md'), 'utf8'), /El hook no pregunta/);
+
+  const sample = await app.request('/api/templates/preview', {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ content: readFileSync(join(ctx.workspace.root, 'templates/video-hyperframes.html'), 'utf8') }),
+  });
+  const preview = (await sample.json()) as { footage: boolean; slides: string[] };
+  assert.equal(preview.footage, true);
+  assert.match(preview.slides[0], /"captions":\[/);
+  assert.match(preview.slides[0], /data-media-start="0"/);
 });

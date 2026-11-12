@@ -1,12 +1,33 @@
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
-import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import {
+  createWriteStream,
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
+import { Readable } from 'node:stream';
+import { pipeline } from 'node:stream/promises';
 import { extname, join, normalize, resolve } from 'node:path';
 import { type Context as Request, Hono } from 'hono';
 import { deleteCookie, getSignedCookie, setSignedCookie } from 'hono/cookie';
 import type { Context } from './agents.ts';
 import type { ItemPatch } from './db.ts';
 import { appConfigured, authorizeUrl, callbackUrl, CONNECTION_KEY, completeConnection } from './connections.ts';
-import { ACTIONS, type Action, canHumanMove, isFormat, isStatus, sceneSeconds, type Slide } from './domain.ts';
+import {
+  ACTIONS,
+  type Action,
+  buildEdit,
+  canHumanMove,
+  isFormat,
+  isStatus,
+  RUNNABLE_FROM,
+  sceneSeconds,
+  type Slide,
+} from './domain.ts';
 import { fetchInsights, type Insights } from './insights.ts';
 import {
   cancelJob,
@@ -55,6 +76,48 @@ const INSIGHTS_TTL_MS = 15 * 60 * 1000;
 const TIME = /^([01]\d|2[0-3]):[0-5]\d$/;
 const MAX_PIECES = 21;
 const SAMPLES = '_muestras';
+const PLAYER = `
+(() => {
+  const timeline = (window.__timelines || {}).main;
+  if (!timeline) return;
+  const report = () => parent.postMessage({ player: { time: timeline.time(), playing: !timeline.paused() } }, "*");
+  timeline.eventCallback("onUpdate", report);
+  timeline.eventCallback("onComplete", () => { timeline.pause(); report(); });
+  addEventListener("message", (event) => {
+    const command = event.data && event.data.player;
+    if (!command) return;
+    if (command.seek !== undefined) timeline.pause().seek(command.seek);
+    if (command.play) { if (timeline.progress() >= 1) timeline.seek(0); timeline.play(); }
+    if (command.pause) timeline.pause();
+    report();
+  });
+  timeline.play(0);
+})();`;
+const FOOTAGE_EXTENSIONS = ['.mp4', '.mov', '.m4v', '.webm'];
+const SAMPLE_WORDS =
+  'Así se ve un video grabado con subtítulos. Cada palabra aparece cuando se dice, y las claves se resaltan. Encima van etiquetas, notas y acercamientos.';
+
+function sampleEdit(service: string) {
+  const words = SAMPLE_WORDS.split(' ').map((text, index) => ({
+    text,
+    start: 0.2 + index * 0.42,
+    end: 0.2 + index * 0.42 + 0.38,
+  }));
+  const transcript = { duration: 0.2 + words.length * 0.42 + 3, words };
+  const built = buildEdit(transcript, {
+    trim: { start: 0, end: transcript.duration },
+    fixes: [],
+    emphasis: [6, 17],
+    hook: 'El título que abre con una [[frase clave]]',
+    cta: 'La llamada a la acción del cierre',
+    moments: [
+      { word: 8, seconds: 2, kind: 'keyword', text: 'Etiqueta' },
+      { word: 14, seconds: 2, kind: 'zoom', text: '' },
+      { word: 19, seconds: 2.2, kind: 'note', text: 'una nota a mano' },
+    ],
+  });
+  return { service, duration: built.duration, scenes: [], footage: { src: '', start: 0 }, edit: built.edit };
+}
 const KEEP_SAMPLES = 6;
 
 const SAMPLE_SLIDES: Slide[] = [
@@ -223,26 +286,18 @@ export function createApp(ctx: Context, fetchImpl: typeof fetch = fetch): Hono {
     const slides = multiple ? SAMPLE_SLIDES : SAMPLE_SLIDES.slice(0, 1);
     const tokens = workspace.tokens();
     const service = body.service ?? '';
-    if (meta.engine === 'remotion') return c.json({ ...meta, slides: [] });
     if (meta.engine === 'hyperframes') {
-      const html = buildCompositionHtml(content, tokens, compositionData(service, slides, sceneSeconds));
-      return c.json({
-        ...meta,
-        slides: [
-          localGsap(html, `<script>${readFileSync(gsapPath(), 'utf8')}</script>`).replace(
-            /<head[^>]*>/i,
-            (head) => `${head}<script>window.__preview=true</script>`,
-          ),
-        ],
-      });
+      const data = meta.footage ? sampleEdit(service) : compositionData(service, slides, sceneSeconds);
+      const html = localGsap(
+        buildCompositionHtml(content, tokens, data),
+        `<script>${readFileSync(gsapPath(), 'utf8')}</script>`,
+      ).replace(/<\/body>/i, () => `<script>${PLAYER}</script></body>`);
+      return c.json({ ...meta, duration: data.duration, slides: [html] });
     }
     return c.json({
       ...meta,
       slides: slides.map((slide, index) =>
-        buildSlideHtml(content, tokens, slide, index, slides.length, {
-          service,
-          seconds: String(sceneSeconds(slide)),
-        }),
+        buildSlideHtml(content, tokens, slide, index, slides.length, { service }),
       ),
     });
   });
@@ -254,7 +309,7 @@ export function createApp(ctx: Context, fetchImpl: typeof fetch = fetch): Hono {
     const content = body.content ?? '';
     const service = body.service ?? '';
     const meta = templateMeta(content);
-    if (!meta?.formats.includes('reel')) {
+    if (!meta?.formats.includes('reel') || meta.engine !== 'hyperframes') {
       return c.json({ error: 'Solo los templates de reel generan un video de muestra.' }, 400);
     }
     const name = `${createHash('sha256').update(`${service}\n${content}`).digest('hex').slice(0, 16)}.mp4`;
@@ -266,31 +321,15 @@ export function createApp(ctx: Context, fetchImpl: typeof fetch = fetch): Hono {
     sampling = true;
     try {
       mkdirSync(dir, { recursive: true });
-      const scenes = SAMPLE_SLIDES.slice(0, 4);
-      const size = { width: meta.width, height: meta.height, path };
-      if (meta.engine === 'nativo') {
-        const tokens = workspace.tokens();
-        await ctx.video({
-          ...size,
-          scenes: scenes.map((slide, index) => {
-            const seconds = sceneSeconds(slide);
-            return {
-              html: buildSlideHtml(content, tokens, slide, index, scenes.length, {
-                service,
-                seconds: String(seconds),
-              }),
-              seconds,
-            };
-          }),
-        });
-      } else {
-        await ctx.compose({
-          ...size,
-          engine: meta.engine,
-          template: content,
-          data: compositionData(service, scenes, sceneSeconds),
-        });
-      }
+      await ctx.compose({
+        width: meta.width,
+        height: meta.height,
+        path,
+        template: content,
+        data: meta.footage
+          ? sampleEdit(service)
+          : compositionData(service, SAMPLE_SLIDES.slice(0, 4), sceneSeconds),
+      });
       const old = readdirSync(dir)
         .map((file) => ({ file, at: statSync(join(dir, file)).mtimeMs }))
         .sort((a, b) => b.at - a.at)
@@ -466,6 +505,36 @@ export function createApp(ctx: Context, fetchImpl: typeof fetch = fetch): Hono {
     const assets = c.req.query('mode') === 'append' ? [...item.assets, asset] : [asset];
     store.addEvent(item.id, 'archivo', asset);
     return c.json(store.updateItem(item.id, { assets }));
+  });
+
+  app.post('/api/items/:id/footage', async (c) => {
+    const item = store.getItem(c.req.param('id'));
+    if (!item) return c.json({ error: 'No existe.' }, 404);
+    if (item.format !== 'reel') return c.json({ error: 'Solo un reel admite video grabado.' }, 400);
+    if (item.status === 'publicando' || item.status === 'publicada') {
+      return c.json({ error: 'La pieza ya se publicó.' }, 409);
+    }
+    const extension = extname(c.req.query('name') ?? '').toLowerCase();
+    if (!FOOTAGE_EXTENSIONS.includes(extension) || !c.req.raw.body) {
+      return c.json({ error: `Formatos permitidos: ${FOOTAGE_EXTENSIONS.join(', ')}.` }, 400);
+    }
+    const active = store.latestJob(item.id);
+    if (active) cancelJob(ctx, active.id);
+    const dir = join(config.dataDir, 'media', item.id);
+    mkdirSync(dir, { recursive: true });
+    for (const name of readdirSync(dir)) {
+      if (name.startsWith('material')) rmSync(join(dir, name), { force: true });
+    }
+    const footage = `${item.id}/material-original${extension}`;
+    await pipeline(
+      Readable.fromWeb(c.req.raw.body as import('node:stream/web').ReadableStream),
+      createWriteStream(join(config.dataDir, 'media', footage)),
+    );
+    store.updateItem(item.id, { footage });
+    store.addEvent(item.id, 'material', 'Video grabado subido');
+    const current = store.getItem(item.id);
+    if (current && RUNNABLE_FROM.produce.includes(current.status)) requestRun(ctx, 'produce', item.id);
+    return c.json(store.getItem(item.id));
   });
 
   app.get('/api/files/:kind', (c) => {

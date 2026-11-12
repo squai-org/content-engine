@@ -183,6 +183,7 @@ const ITEM_COLUMNS = [
   'permalink',
   'error',
   'first_comment',
+  'footage',
 ] as const;
 
 export type ItemPatch = Partial<Pick<Item, (typeof ITEM_COLUMNS)[number]>>;
@@ -205,6 +206,9 @@ export function createStore(path: string) {
   const itemColumns = db.prepare('PRAGMA table_info(items)').all() as Row[];
   if (!itemColumns.some((column) => column.name === 'first_comment')) {
     db.exec(`ALTER TABLE items ADD COLUMN first_comment TEXT NOT NULL DEFAULT ''`);
+  }
+  if (!itemColumns.some((column) => column.name === 'footage')) {
+    db.exec(`ALTER TABLE items ADD COLUMN footage TEXT NOT NULL DEFAULT ''`);
   }
   const insertHook = db.prepare(
     `INSERT OR IGNORE INTO hooks (id, name, trigger, status, weekday, time, action, agent, enabled)
