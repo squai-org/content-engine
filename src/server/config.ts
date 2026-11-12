@@ -12,6 +12,7 @@ export type Config = {
   webDir: string;
   claudeBin: string;
   chromiumPath: string | undefined;
+  ffmpegPath: string;
   igUserId: string;
   igAccessToken: string;
   igGraphUrl: string;
@@ -41,6 +42,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     webDir: resolve('dist/web'),
     claudeBin: env.CLAUDE_BIN ?? 'claude',
     chromiumPath: env.CHROMIUM_PATH || undefined,
+    ffmpegPath: env.FFMPEG_PATH || 'ffmpeg',
     igUserId: env.IG_USER_ID ?? '',
     igAccessToken: env.IG_ACCESS_TOKEN ?? '',
     igGraphUrl: (env.IG_GRAPH_URL ?? `https://graph.facebook.com/${graphVersion}`).replace(/\/$/, ''),

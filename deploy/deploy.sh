@@ -15,6 +15,31 @@ if command -v apt-get >/dev/null; then
   PLAYWRIGHT_DEPS="--with-deps"
 fi
 
+ensure_ffmpeg() {
+  if command -v ffmpeg >/dev/null || [ -x /usr/local/bin/ffmpeg ]; then
+    return 0
+  fi
+  if command -v apt-get >/dev/null; then
+    DEBIAN_FRONTEND=noninteractive apt-get install -y ffmpeg && return 0
+  fi
+  local arch tmp
+  case "$(uname -m)" in
+    aarch64 | arm64) arch=linuxarm64 ;;
+    *) arch=linux64 ;;
+  esac
+  tmp="$(mktemp -d)"
+  if curl -fsSL "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-$arch-gpl.tar.xz" -o "$tmp/ffmpeg.tar.xz" &&
+    tar -xJf "$tmp/ffmpeg.tar.xz" -C "$tmp" --strip-components=2 --wildcards '*/bin/ffmpeg'; then
+    install -m 755 "$tmp/ffmpeg" /usr/local/bin/ffmpeg
+    if command -v restorecon >/dev/null; then
+      restorecon /usr/local/bin/ffmpeg || true
+    fi
+  else
+    echo "No pude instalar ffmpeg. Los reels no se exportarán hasta instalarlo." >&2
+  fi
+  rm -rf "$tmp"
+}
+
 as_app() {
   runuser -u "$APP_USER" -- env HOME="$APP_HOME" "$@"
 }
@@ -36,9 +61,15 @@ healthy() {
 }
 
 activate() {
+  if [ -f "$APP_DIR/deploy/$SERVICE.service" ]; then
+    install -m 644 "$APP_DIR/deploy/$SERVICE.service" "/etc/systemd/system/$SERVICE.service"
+    systemctl daemon-reload
+  fi
   systemctl restart "$SERVICE" || return 1
   healthy
 }
+
+ensure_ffmpeg
 
 previous="$(as_app git -C "$APP_DIR" rev-parse HEAD)"
 as_app git -C "$APP_DIR" fetch --prune origin

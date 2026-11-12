@@ -1,10 +1,10 @@
 import { type DragEvent, useMemo, useState } from 'react';
 import { api, FORMAT_LABEL, type Item, STATUS_LABEL } from '../api.ts';
+import { Icon, Segmented, Thumb } from '../ui.tsx';
 
 type Mode = 'mes' | 'semana';
 type Props = {
   items: Item[];
-  selected: string | null;
   onOpen: (id: string) => void;
   onCreate: (scheduledAt: string | null) => void;
   onChanged: () => void;
@@ -33,7 +33,7 @@ function timeLabel(iso: string): string {
   return new Date(iso).toLocaleTimeString('es', { hour: '2-digit', minute: '2-digit' });
 }
 
-export function Calendar({ items, selected, onOpen, onCreate, onChanged }: Props) {
+export function Calendar({ items, onOpen, onCreate, onChanged }: Props) {
   const [mode, setMode] = useState<Mode>('mes');
   const [cursor, setCursor] = useState(() => new Date());
   const [target, setTarget] = useState<string | null>(null);
@@ -98,30 +98,27 @@ export function Calendar({ items, selected, onOpen, onCreate, onChanged }: Props
       <header className="toolbar">
         <h1 className="title">{title}</h1>
         <div className="spacer" />
-        <div className="segmented">
-          {(['mes', 'semana'] as Mode[]).map((option) => (
-            <button
-              key={option}
-              type="button"
-              className={mode === option ? 'on' : ''}
-              onClick={() => setMode(option)}
-            >
-              {option === 'mes' ? 'Mes' : 'Semana'}
-            </button>
-          ))}
-        </div>
+        <Segmented
+          value={mode}
+          options={[
+            { value: 'mes', label: 'Mes' },
+            { value: 'semana', label: 'Semana' },
+          ]}
+          onChange={setMode}
+        />
         <div className="segmented">
           <button type="button" onClick={() => move(-1)} aria-label="Anterior">
-            ‹
+            <Icon name="left" size={14} />
           </button>
           <button type="button" onClick={() => setCursor(new Date())}>
             Hoy
           </button>
           <button type="button" onClick={() => move(1)} aria-label="Siguiente">
-            ›
+            <Icon name="right" size={14} />
           </button>
         </div>
         <button type="button" className="primary" onClick={() => onCreate(null)}>
+          <Icon name="plus" size={14} />
           Nueva idea
         </button>
       </header>
@@ -129,7 +126,7 @@ export function Calendar({ items, selected, onOpen, onCreate, onChanged }: Props
         <div className="tray">
           <span className="tray-label">Sin fecha</span>
           {unscheduled.map((item) => (
-            <Chip key={item.id} item={item} active={item.id === selected} onOpen={onOpen} />
+            <Chip key={item.id} item={item} onOpen={onOpen} />
           ))}
         </div>
       )}
@@ -159,7 +156,6 @@ export function Calendar({ items, selected, onOpen, onCreate, onChanged }: Props
                 <Chip
                   key={item.id}
                   item={item}
-                  active={item.id === selected}
                   onOpen={onOpen}
                   large={mode === 'semana'}
                 />
@@ -174,12 +170,10 @@ export function Calendar({ items, selected, onOpen, onCreate, onChanged }: Props
 
 function Chip({
   item,
-  active,
   onOpen,
   large,
 }: {
   item: Item;
-  active: boolean;
   onOpen: (id: string) => void;
   large?: boolean;
 }) {
@@ -187,25 +181,21 @@ function Chip({
     <button
       type="button"
       draggable
-      className={`chip s-${item.status}${active ? ' active' : ''}${large ? ' large' : ''}`}
-      title={`${STATUS_LABEL[item.status]} · ${FORMAT_LABEL[item.format]}`}
+      className={`chip s-${item.status}${large ? ' large' : ''}`}
+      title={`${item.title} · ${STATUS_LABEL[item.status]} · ${FORMAT_LABEL[item.format]}`}
       onDragStart={(event) => event.dataTransfer.setData('text/plain', item.id)}
       onDoubleClick={(event) => event.stopPropagation()}
       onClick={() => onOpen(item.id)}
     >
-      {large && item.assets[0] && !/\.(mp4|mov)$/.test(item.assets[0]) && (
-        <img src={`/media/${item.assets[0]}`} alt="" />
-      )}
-      <span className="chip-line">
-        <span className="chip-dot" />
-        {item.scheduled_at && <span className="chip-time">{timeLabel(item.scheduled_at)}</span>}
+      <Thumb item={item} className="chip-thumb" />
+      <span className="chip-text">
         <span className="chip-title">{item.title}</span>
-      </span>
-      {large && (
         <span className="chip-meta">
-          {FORMAT_LABEL[item.format]} · {STATUS_LABEL[item.status]}
+          <span className="chip-dot" />
+          {item.scheduled_at && timeLabel(item.scheduled_at)}
+          {large && ` · ${FORMAT_LABEL[item.format]} · ${STATUS_LABEL[item.status]}`}
         </span>
-      )}
+      </span>
     </button>
   );
 }

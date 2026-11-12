@@ -1,6 +1,14 @@
-import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { appendFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { createHash } from 'node:crypto';
+import {
+  appendFileSync,
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
+import { dirname, join, relative } from 'node:path';
 import type { Format } from './domain.ts';
 
 export const KINDS = ['bases', 'templates', 'skills', 'agents'] as const;
@@ -23,11 +31,72 @@ export function isKind(value: string): value is Kind {
   return KINDS.includes(value as Kind);
 }
 
-export function createWorkspace(root: string, seedDir: string) {
-  if (!existsSync(root)) {
-    mkdirSync(dirname(root), { recursive: true });
-    cpSync(seedDir, root, { recursive: true });
+const SEED_HISTORY = '.seed-history.json';
+const SEED_MANIFEST = '.seed.json';
+
+function fingerprint(path: string): string {
+  return createHash('sha256').update(readFileSync(path)).digest('hex').slice(0, 16);
+}
+
+function walk(dir: string, base = dir): string[] {
+  return readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
+    const path = join(dir, entry.name);
+    return entry.isDirectory() ? walk(path, base) : [relative(base, path)];
+  });
+}
+
+function readJson<T>(path: string, fallback: T): T {
+  try {
+    return JSON.parse(readFileSync(path, 'utf8')) as T;
+  } catch {
+    return fallback;
   }
+}
+
+export function templateMeta(html: string): Omit<TemplateInfo, 'name'> | null {
+  const size = /<meta name="size" content="(\d+)x(\d+)"/.exec(html);
+  const formats = /<meta name="formats" content="([^"]+)"/.exec(html);
+  if (!size || !formats) return null;
+  return {
+    width: Number(size[1]),
+    height: Number(size[2]),
+    formats: formats[1].split(',').map((format) => format.trim()),
+  };
+}
+
+export function syncSeed(root: string, seedDir: string): string[] {
+  if (!existsSync(seedDir)) return [];
+  mkdirSync(root, { recursive: true });
+  const history = readJson<Record<string, string[]>>(join(seedDir, SEED_HISTORY), {});
+  const manifestPath = join(root, SEED_MANIFEST);
+  const manifest = readJson<Record<string, string>>(manifestPath, {});
+  const fresh = !existsSync(manifestPath);
+  const written: string[] = [];
+  for (const file of walk(seedDir)) {
+    if (file === SEED_HISTORY) continue;
+    const source = join(seedDir, file);
+    const target = join(root, file);
+    const seedHash = fingerprint(source);
+    const copy = () => {
+      mkdirSync(dirname(target), { recursive: true });
+      writeFileSync(target, readFileSync(source));
+      manifest[file] = seedHash;
+      written.push(file);
+    };
+    if (!existsSync(target)) {
+      if (manifest[file] !== seedHash) copy();
+      continue;
+    }
+    const current = fingerprint(target);
+    if (current === seedHash) manifest[file] = seedHash;
+    else if (manifest[file] === current || (fresh && history[file]?.includes(current))) copy();
+  }
+  writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 1)}\n`);
+  return written;
+}
+
+export function createWorkspace(root: string, seedDir: string) {
+  syncSeed(root, seedDir);
 
   function pathFor(kind: Kind, name: string): string {
     const spec = SPECS[kind];
@@ -65,15 +134,8 @@ export function createWorkspace(root: string, seedDir: string) {
   function templateInfo(name: string): TemplateInfo | null {
     const html = read('templates', name);
     if (!html || !name.endsWith('.html')) return null;
-    const size = /<meta name="size" content="(\d+)x(\d+)"/.exec(html);
-    const formats = /<meta name="formats" content="([^"]+)"/.exec(html);
-    if (!size || !formats) return null;
-    return {
-      name,
-      width: Number(size[1]),
-      height: Number(size[2]),
-      formats: formats[1].split(',').map((format) => format.trim()),
-    };
+    const meta = templateMeta(html);
+    return meta ? { name, ...meta } : null;
   }
 
   function templatesFor(format: Format): TemplateInfo[] {

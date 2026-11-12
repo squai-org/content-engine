@@ -1,8 +1,13 @@
 import type { Format } from './domain.ts';
 
 export type InstagramAccount = { graphUrl: string; userId: string; token: string };
-export type Publication = { format: Format; caption: string; mediaUrls: string[] };
-export type Published = { id: string; permalink: string | null };
+export type Publication = {
+  format: Format;
+  caption: string;
+  mediaUrls: string[];
+  firstComment?: string;
+};
+export type Published = { id: string; permalink: string | null; warning?: string };
 export type Publish = (account: InstagramAccount, publication: Publication) => Promise<Published>;
 
 type Options = { fetchImpl?: typeof fetch; sleep?: (ms: number) => Promise<void>; maxPolls?: number };
@@ -93,6 +98,15 @@ export function instagramPublisher(options: Options = {}): Publish {
     const details = await call(account, 'GET', published.id, { fields: 'permalink' }).catch(
       () => ({}) as Record<string, string>,
     );
-    return { id: published.id, permalink: details.permalink ?? null };
+    const result: Published = { id: published.id, permalink: details.permalink ?? null };
+    const comment = publication.firstComment?.trim();
+    if (comment && publication.format !== 'story') {
+      await call(account, 'POST', `${published.id}/comments`, { message: comment }).catch(
+        (error: Error) => {
+          result.warning = `No se publicó el primer comentario. ${error.message}`;
+        },
+      );
+    }
+    return result;
   };
 }

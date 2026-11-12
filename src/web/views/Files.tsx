@@ -1,9 +1,19 @@
 import { useCallback, useEffect, useState } from 'react';
 import { api } from '../api.ts';
+import { Icon, Markdown, Segmented, splitFrontmatter } from '../ui.tsx';
 
 type Props = { kind: string; title: string; extension: string };
+type Mode = 'vista' | 'editar';
 
-export function Files({ kind, title, extension }: Props) {
+const META_LABEL: Record<string, string> = {
+  name: 'Nombre',
+  description: 'Descripción',
+  tools: 'Herramientas',
+  model: 'Modelo',
+  skills: 'Skills',
+};
+
+export function useFiles(kind: string) {
   const [names, setNames] = useState<string[]>([]);
   const [current, setCurrent] = useState<string | null>(null);
   const [content, setContent] = useState('');
@@ -26,16 +36,6 @@ export function Files({ kind, title, extension }: Props) {
     return list;
   }, [kind]);
 
-  useEffect(() => {
-    setCurrent(null);
-    setContent('');
-    setSaved('');
-    setError('');
-    loadList().then((list) => {
-      if (list[0]) open(list[0]);
-    });
-  }, [loadList, open]);
-
   async function guard(action: () => Promise<void>) {
     setError('');
     try {
@@ -45,82 +45,151 @@ export function Files({ kind, title, extension }: Props) {
     }
   }
 
-  const save = () =>
-    guard(async () => {
-      await api(`/files/${kind}/${current}`, 'PUT', { content });
-      setSaved(content);
-    });
+  const close = () => {
+    setCurrent(null);
+    setContent('');
+    setSaved('');
+  };
 
-  const create = () =>
-    guard(async () => {
-      const typed = window.prompt('Nombre en minúsculas, con guiones');
-      if (!typed) return;
-      const base = typed.trim().toLowerCase();
-      const name = extension && !base.includes('.') ? `${base}${extension}` : base;
-      await api(`/files/${kind}/${name}`, 'PUT', { content: '' });
-      await loadList();
-      await open(name);
-    });
+  return {
+    names,
+    current,
+    content,
+    setContent,
+    error,
+    dirty: content !== saved,
+    loadList,
+    close,
+    open: (name: string) => guard(() => open(name)),
+    save: () =>
+      guard(async () => {
+        await api(`/files/${kind}/${current}`, 'PUT', { content });
+        setSaved(content);
+      }),
+    create: (extension: string, initial = '') =>
+      guard(async () => {
+        const typed = window.prompt('Nombre en minúsculas, con guiones');
+        if (!typed) return;
+        const base = typed.trim().toLowerCase();
+        const name = extension && !base.includes('.') ? `${base}${extension}` : base;
+        await api(`/files/${kind}/${name}`, 'PUT', { content: initial });
+        await loadList();
+        await open(name);
+      }),
+    remove: () =>
+      guard(async () => {
+        if (!current || !window.confirm(`¿Eliminar ${current}?`)) return;
+        await api(`/files/${kind}/${current}`, 'DELETE');
+        close();
+        await loadList();
+      }),
+  };
+}
 
-  const remove = () =>
-    guard(async () => {
-      if (!current || !window.confirm(`¿Eliminar ${current}?`)) return;
-      await api(`/files/${kind}/${current}`, 'DELETE');
-      setCurrent(null);
-      setContent('');
-      setSaved('');
-      const list = await loadList();
-      if (list[0]) await open(list[0]);
-    });
+export function Files({ kind, title, extension }: Props) {
+  const files = useFiles(kind);
+  const [mode, setMode] = useState<Mode>('vista');
+  const { loadList, open, close } = files;
 
-  const dirty = content !== saved;
+  useEffect(() => {
+    close();
+    setMode('vista');
+    loadList().then((list) => {
+      if (list[0]) open(list[0]);
+    });
+  }, [kind]);
+
+  const { meta, body } = splitFrontmatter(files.content);
 
   return (
     <section className="view">
       <header className="toolbar">
         <h1 className="title">{title}</h1>
         <div className="spacer" />
-        {error && <span className="error-text">{error}</span>}
-        {current && (
-          <button type="button" className="destructive" onClick={remove}>
+        {files.error && <span className="error-text">{files.error}</span>}
+        {files.current && (
+          <Segmented
+            value={mode}
+            options={[
+              { value: 'vista', label: 'Vista' },
+              { value: 'editar', label: 'Editar' },
+            ]}
+            onChange={setMode}
+          />
+        )}
+        {files.current && (
+          <button type="button" className="destructive" onClick={files.remove}>
+            <Icon name="trash" size={14} />
             Eliminar
           </button>
         )}
-        <button type="button" onClick={create}>
+        <button type="button" onClick={() => files.create(extension).then(() => setMode('editar'))}>
+          <Icon name="plus" size={14} />
           Nuevo
         </button>
-        <button type="button" className="primary" disabled={!current || !dirty} onClick={save}>
-          Guardar
-        </button>
+        {(mode === 'editar' || files.dirty) && (
+          <button type="button" className="primary" disabled={!files.dirty} onClick={files.save}>
+            Guardar
+          </button>
+        )}
       </header>
       <div className="split">
         <div className="file-list">
-          {names.map((name) => (
+          {files.names.map((name) => (
             <button
               key={name}
               type="button"
-              className={`nav-item${name === current ? ' active' : ''}`}
-              onClick={() => guard(() => open(name))}
+              className={`file-item${name === files.current ? ' active' : ''}`}
+              onClick={() => files.open(name)}
             >
-              {name}
+              <Icon name="doc" size={15} />
+              <span>{name.replace(/\.md$/, '')}</span>
             </button>
           ))}
         </div>
-        {current ? (
+        {!files.current && <p className="empty">Nada seleccionado.</p>}
+        {files.current && mode === 'editar' && (
           <textarea
             className="editor"
             spellCheck={false}
-            value={content}
-            onChange={(event) => setContent(event.target.value)}
+            value={files.content}
+            onChange={(event) => files.setContent(event.target.value)}
             onKeyDown={(event) => {
               if ((event.metaKey || event.ctrlKey) && event.key === 's') {
                 event.preventDefault();
-                if (dirty) save();
+                if (files.dirty) files.save();
               }
             }}
           />
-        ) : (
-          <p className="empty">Nada seleccionado.</p>
+        )}
+        {files.current && mode === 'vista' && (
+          <div className="reader">
+            <article>
+              {meta.length > 0 && (
+                <dl className="meta">
+                  {meta.map(([key, value]) => (
+                    <div key={key}>
+                      <dt>{META_LABEL[key] ?? key}</dt>
+                      <dd>
+                        {key === 'tools' || key === 'skills'
+                          ? value.split(',').map((entry) => (
+                              <span key={entry} className="tag">
+                                {entry.trim()}
+                              </span>
+                            ))
+                          : value}
+                      </dd>
+                    </div>
+                  ))}
+                </dl>
+              )}
+              {body.trim() ? (
+                <Markdown source={body} />
+              ) : (
+                <p className="empty">Documento vacío. Pulsa Editar para escribir.</p>
+              )}
+            </article>
+          </div>
         )}
       </div>
     </section>

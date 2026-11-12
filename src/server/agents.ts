@@ -1,13 +1,34 @@
-import { execFile } from 'node:child_process';
-import { join } from 'node:path';
+import { spawn } from 'node:child_process';
+import { existsSync, readdirSync, rmSync } from 'node:fs';
+import { basename, join } from 'node:path';
 import type { Config } from './config.ts';
+import type { Monitor } from './monitor.ts';
 import type { Job, Store } from './db.ts';
-import { FORMATS, type Item, normalizeFormat, proposalViolations, type Slide } from './domain.ts';
+import {
+  FORMATS,
+  type Item,
+  normalizeFormat,
+  proposalViolations,
+  sceneSeconds,
+  type Slide,
+} from './domain.ts';
 import type { Publish } from './publisher.ts';
-import { buildSlideHtml, type Renderer } from './render.ts';
+import { buildSlideHtml, type Renderer, type VideoRenderer } from './render.ts';
 import type { Workspace } from './workspace.ts';
 
-export type ExecutorInput = { agent: string; prompt: string; schema: object; cwd: string };
+export type AgentEvent = {
+  kind: 'prompt' | 'text' | 'thinking' | 'tool' | 'tool_result' | 'step' | 'error';
+  name: string;
+  body: string;
+};
+export type ExecutorInput = {
+  agent: string;
+  prompt: string;
+  schema: object;
+  cwd: string;
+  signal?: AbortSignal;
+  onEvent?: (event: AgentEvent) => void;
+};
 export type Executor = (input: ExecutorInput) => Promise<unknown>;
 
 export type Context = {
@@ -16,12 +37,16 @@ export type Context = {
   workspace: Workspace;
   executor: Executor;
   renderer: Renderer;
+  video: VideoRenderer;
   publish: Publish;
+  monitor: Monitor;
 };
 
 const TOOLS = ['Read', 'Glob', 'Grep', 'WebSearch', 'WebFetch', 'Skill'];
 const TIMEOUT_MS = 20 * 60 * 1000;
 const MAX_ATTEMPTS = 2;
+const MAX_RESULT_CHARS = 6000;
+const WEEKDAY_NAMES = ['domingo', 'lunes', 'martes', 'miércoles', 'jueves', 'viernes', 'sábado'];
 
 const SLIDES_SCHEMA = {
   type: 'array',
@@ -31,8 +56,10 @@ const SLIDES_SCHEMA = {
       kicker: { type: 'string' },
       title: { type: 'string' },
       body: { type: 'string' },
+      note: { type: 'string' },
+      source: { type: 'string' },
     },
-    required: ['kicker', 'title', 'body'],
+    required: ['kicker', 'title', 'body', 'note', 'source'],
     additionalProperties: false,
   },
 };
@@ -63,6 +90,7 @@ const PLAN_SCHEMA = {
   properties: {
     items: {
       type: 'array',
+      minItems: 1,
       items: {
         type: 'object',
         properties: {
@@ -98,8 +126,69 @@ type Proposal = { copy: string; template: string; slides: Slide[]; script: strin
 type Revision = Proposal & { learning: string };
 type Plan = { items: Record<string, string>[]; research: string };
 
+type Block = {
+  type?: string;
+  text?: string;
+  thinking?: string;
+  name?: string;
+  input?: unknown;
+  content?: unknown;
+  is_error?: boolean;
+};
+type StreamLine = {
+  type?: string;
+  message?: { content?: Block[] | string };
+  is_error?: boolean;
+  result?: string;
+  structured_output?: unknown;
+};
+
+function blockText(content: unknown): string {
+  if (typeof content === 'string') return content;
+  if (!Array.isArray(content)) return '';
+  return content
+    .map((part: Block) => (typeof part === 'string' ? part : (part.text ?? '')))
+    .join('\n');
+}
+
+export function agentEvents(line: StreamLine): AgentEvent[] {
+  const content = line.message?.content;
+  if (!Array.isArray(content)) return [];
+  const events: AgentEvent[] = [];
+  for (const block of content) {
+    if (line.type === 'assistant' && block.type === 'text' && block.text?.trim()) {
+      events.push({ kind: 'text', name: '', body: block.text });
+    } else if (line.type === 'assistant' && block.type === 'thinking' && block.thinking?.trim()) {
+      events.push({ kind: 'thinking', name: '', body: block.thinking });
+    } else if (line.type === 'assistant' && block.type === 'tool_use') {
+      events.push({ kind: 'tool', name: block.name ?? '', body: JSON.stringify(block.input ?? {}) });
+    } else if (line.type === 'user' && block.type === 'tool_result') {
+      events.push({
+        kind: 'tool_result',
+        name: block.is_error ? 'error' : '',
+        body: blockText(block.content).slice(0, MAX_RESULT_CHARS),
+      });
+    }
+  }
+  return events;
+}
+
+function extractJson(text: string): unknown {
+  const start = text.indexOf('{');
+  const end = text.lastIndexOf('}');
+  if (start === -1 || end <= start) throw new Error('Claude no devolvió JSON.');
+  return JSON.parse(text.slice(start, end + 1));
+}
+
+export function parseClaudeOutput(stdout: string): unknown {
+  const output = JSON.parse(stdout) as StreamLine;
+  if (output.is_error) throw new Error(output.result ?? 'Claude devolvió un error.');
+  if (output.structured_output !== undefined) return output.structured_output;
+  return extractJson(output.result ?? '');
+}
+
 export function claudeExecutor(bin: string): Executor {
-  return ({ agent, prompt, schema, cwd }) =>
+  return ({ agent, prompt, schema, cwd, signal, onEvent }) =>
     new Promise((resolve, reject) => {
       const contract = [
         prompt,
@@ -112,42 +201,77 @@ export function claudeExecutor(bin: string): Executor {
         '--agent',
         agent,
         '--output-format',
-        'json',
+        'stream-json',
+        '--verbose',
         '--allowedTools',
         ...TOOLS,
       ];
-      execFile(
-        bin,
-        args,
-        { cwd, timeout: TIMEOUT_MS, maxBuffer: 64 * 1024 * 1024 },
-        (error, stdout, stderr) => {
-          if (error && !stdout) {
-            reject(new Error(stderr.trim() || error.message));
-            return;
-          }
-          try {
-            resolve(parseClaudeOutput(stdout));
-          } catch (parseError) {
-            reject(parseError);
-          }
-        },
-      );
-    });
-}
+      if (signal?.aborted) {
+        reject(new Error('Ejecución cancelada.'));
+        return;
+      }
+      const child = spawn(bin, args, { cwd, stdio: ['ignore', 'pipe', 'pipe'] });
+      let pending = '';
+      let stderr = '';
+      let lastText = '';
+      let result: StreamLine | null = null;
+      let timedOut = false;
+      const stop = () => child.kill('SIGTERM');
+      const timer = setTimeout(() => {
+        timedOut = true;
+        stop();
+      }, TIMEOUT_MS);
+      signal?.addEventListener('abort', stop, { once: true });
 
-export function parseClaudeOutput(stdout: string): unknown {
-  const output = JSON.parse(stdout) as {
-    is_error?: boolean;
-    result?: string;
-    structured_output?: unknown;
-  };
-  if (output.is_error) throw new Error(output.result ?? 'Claude devolvió un error.');
-  if (output.structured_output !== undefined) return output.structured_output;
-  const text = output.result ?? '';
-  const start = text.indexOf('{');
-  const end = text.lastIndexOf('}');
-  if (start === -1 || end <= start) throw new Error('Claude no devolvió JSON.');
-  return JSON.parse(text.slice(start, end + 1));
+      function read(raw: string): void {
+        if (!raw.trim()) return;
+        let line: StreamLine;
+        try {
+          line = JSON.parse(raw) as StreamLine;
+        } catch {
+          return;
+        }
+        if (line.type === 'result') result = line;
+        for (const event of agentEvents(line)) {
+          if (event.kind === 'text') lastText = event.body;
+          onEvent?.(event);
+        }
+      }
+
+      child.stdout.on('data', (chunk: Buffer) => {
+        pending += chunk.toString();
+        const lines = pending.split('\n');
+        pending = lines.pop() ?? '';
+        lines.forEach(read);
+      });
+      child.stderr.on('data', (chunk: Buffer) => {
+        stderr = (stderr + chunk.toString()).slice(-4000);
+      });
+      child.on('error', (error) => {
+        clearTimeout(timer);
+        reject(error);
+      });
+      child.on('close', (code) => {
+        clearTimeout(timer);
+        signal?.removeEventListener('abort', stop);
+        read(pending);
+        if (signal?.aborted) return reject(new Error('Ejecución cancelada.'));
+        if (timedOut) return reject(new Error('El agente superó el tiempo máximo de 20 minutos.'));
+        const final = result as StreamLine | null;
+        if (!final) return reject(new Error(stderr.trim() || `Claude terminó con código ${code}.`));
+        if (final.is_error) return reject(new Error(final.result ?? 'Claude devolvió un error.'));
+        try {
+          if (final.structured_output !== undefined) return resolve(final.structured_output);
+          try {
+            resolve(extractJson(final.result ?? ''));
+          } catch {
+            resolve(extractJson(lastText));
+          }
+        } catch (parseError) {
+          reject(parseError);
+        }
+      });
+    });
 }
 
 function itemBrief(item: Item): string {
@@ -167,6 +291,15 @@ function itemBrief(item: Item): string {
   );
 }
 
+const FORMAT_RULES = [
+  'Reglas del formato:',
+  '- Cada lámina lleva kicker, title, body, note y source. Deja en cadena vacía lo que no uses.',
+  '- En title puedes resaltar una sola frase con dobles corchetes: [[frase clave]].',
+  '- note es una anotación breve y humana. source es la fuente verificable de un dato; sin dato, vacío.',
+  '- Si el formato es reel: aplica la skill video-reel y lee bases/sistema-de-video.md. Escribe el guion completo en script y divide el video en 3 a 9 escenas dentro de slides, con el texto que aparece en pantalla en cada una. El servidor anima y exporta el video.',
+  '- Si el formato no es reel, deja script vacío.',
+].join('\n');
+
 function templatesBrief(ctx: Context, item: Item): string {
   const names = ctx.workspace.templatesFor(item.format).map((template) => template.name);
   return names.length ? names.join(', ') : 'ninguno';
@@ -178,7 +311,7 @@ function producePrompt(ctx: Context, item: Item): string {
     'Lee todo bases/ antes de escribir. Aplica las skills copy-instagram y diseno-pieza.',
     `Pieza:\n${itemBrief(item)}`,
     `Templates disponibles en templates/ para este formato: ${templatesBrief(ctx, item)}.`,
-    'Si el formato es reel, deja slides vacío y escribe el guion en script. En otro caso deja script vacío.',
+    FORMAT_RULES,
     'Devuelve solo el JSON pedido.',
   ].join('\n\n');
 }
@@ -191,6 +324,7 @@ function revisePrompt(ctx: Context, item: Item): string {
     `Propuesta actual:\n${JSON.stringify({ copy: item.copy, ...item.spec }, null, 2)}`,
     `Anotaciones:\n${item.notes}`,
     `Templates disponibles en templates/ para este formato: ${templatesBrief(ctx, item)}.`,
+    FORMAT_RULES,
     'Cambia solo lo que piden las anotaciones. En learning resume en una frase la regla general que se aprende, o deja vacío si no hay.',
     'Devuelve solo el JSON pedido.',
   ].join('\n\n');
@@ -211,6 +345,10 @@ export function nextWeek(now: Date, timezone: string): { from: string; to: strin
 
 function planPrompt(ctx: Context, from: string, to: string): string {
   const taxonomy = ctx.store.getTaxonomy();
+  const planning = ctx.store.getPlanning();
+  const slots = planning.slots
+    .map((slot) => `${WEEKDAY_NAMES[slot.weekday]} ${slot.time}`)
+    .join(', ');
   const scheduled = ctx.store
     .listItems({ from: `${from}T00:00:00.000Z`, to: `${to}T23:59:59.999Z` })
     .filter((item) => item.scheduled_at)
@@ -223,25 +361,46 @@ function planPrompt(ctx: Context, from: string, to: string): string {
     `Etapas del embudo: ${taxonomy.funnel.join(', ')}.`,
     `Llamadas a la acción: ${taxonomy.ctas.join(', ')}.`,
     `Formatos: ${FORMATS.join(', ')}.`,
+    `Cantidad: ${planning.pieces} piezas, salvo que bases/estrategia.md defina otro ritmo semanal.`,
+    `Horarios preferidos de publicación: ${slots || 'libres'}.`,
     `Ya programado en ese rango:\n${scheduled.join('\n') || 'nada'}`,
     `Títulos recientes que no se repiten:\n${ctx.store.recentTitles(40).join('\n') || 'ninguno'}`,
     'En research escribe, en Markdown, lo que investigaste para esta semana: fechas que activan algo en el lector, noticias de IA que cambian algo concreto, y por qué elegiste cada ángulo. Cita la URL de cada hecho externo. Deja fuera lo que no puedas verificar.',
+    'items es obligatorio y nunca va vacío. Si a las bases les falta información, planifica igual con los pilares, servicios y llamadas a la acción de este mensaje y anota en research qué supuesto tomaste. No respondas solo con research.',
     'scheduled_at va en ISO 8601 con offset de la zona horaria. Devuelve solo el JSON pedido.',
   ].join('\n\n');
 }
 
-function normalizeSlides(item: Item, slides: Slide[]): Slide[] {
-  if (item.format === 'reel') return [];
+function normalizeSlides(slides: Slide[]): Slide[] {
   return slides.map((slide) => ({
     kicker: slide.kicker ?? '',
     title: slide.title ?? '',
     body: slide.body ?? '',
+    note: slide.note ?? '',
+    source: slide.source ?? '',
   }));
 }
 
+type Run = { ctx: Context; job: Job; signal?: AbortSignal };
+
+function log(run: Run, kind: AgentEvent['kind'], name: string, body = ''): void {
+  run.ctx.store.addJobEvent(run.job.id, kind, name, body);
+}
+
+function ask<T>(run: Run, prompt: string, schema: object): Promise<T> {
+  log(run, 'prompt', run.job.agent, prompt);
+  return run.ctx.executor({
+    agent: run.job.agent,
+    prompt,
+    schema,
+    cwd: run.ctx.workspace.root,
+    signal: run.signal,
+    onEvent: (event) => log(run, event.kind, event.name, event.body),
+  }) as Promise<T>;
+}
+
 async function propose<T extends Proposal>(
-  ctx: Context,
-  job: Job,
+  run: Run,
   item: Item,
   prompt: string,
   schema: object,
@@ -249,43 +408,71 @@ async function propose<T extends Proposal>(
   let feedback = '';
   let problems: string[] = [];
   for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt += 1) {
-    const output = (await ctx.executor({
-      agent: job.agent,
-      prompt: prompt + feedback,
-      schema,
-      cwd: ctx.workspace.root,
-    })) as T;
-    output.slides = normalizeSlides(item, output.slides ?? []);
-    problems =
-      item.format === 'reel'
-        ? proposalViolations('reel', output.copy ?? '', []).concat(
-            output.script?.trim() ? [] : ['El reel necesita guion.'],
-          )
-        : proposalViolations(item.format, output.copy ?? '', output.slides);
+    const output = await ask<T>(run, prompt + feedback, schema);
+    output.slides = normalizeSlides(Array.isArray(output.slides) ? output.slides : []);
+    problems = proposalViolations(item.format, output.copy ?? '', output.slides);
+    if (item.format === 'reel' && !output.script?.trim()) problems.push('El reel necesita guion.');
     if (!problems.length) return output;
+    log(run, 'step', 'La propuesta incumple reglas', problems.join('\n'));
     feedback = `\n\nTu respuesta anterior incumplió estas reglas, corrígelas:\n- ${problems.join('\n- ')}`;
   }
   throw new Error(`La propuesta incumple reglas: ${problems.join(' ')}`);
 }
 
-async function applyProposal(ctx: Context, item: Item, proposal: Proposal): Promise<Item> {
+function pruneMedia(dir: string, keep: string[]): void {
+  if (!existsSync(dir)) return;
+  const names = new Set(keep.map((asset) => basename(asset)));
+  for (const name of readdirSync(dir)) {
+    if (!names.has(name)) rmSync(join(dir, name), { force: true });
+  }
+}
+
+async function applyProposal(run: Run, item: Item, proposal: Proposal): Promise<Item> {
+  const { ctx } = run;
   const iteration = item.iteration + 1;
+  const mediaDir = join(ctx.config.dataDir, 'media');
   let assets = item.assets;
   let templateName = '';
   if (proposal.slides.length) {
     const template = ctx.workspace.pickTemplate(proposal.template, item.format);
     const html = ctx.workspace.read('templates', template.name) as string;
     const tokens = ctx.workspace.tokens();
+    const total = proposal.slides.length;
+    const build = (slide: Slide, index: number, seconds = 0) =>
+      buildSlideHtml(html, tokens, slide, index, total, {
+        service: item.service,
+        seconds: String(seconds),
+      });
     templateName = template.name;
-    assets = proposal.slides.map((_, index) => `${item.id}/v${iteration}-${index + 1}.jpg`);
-    await ctx.renderer(
-      proposal.slides.map((slide, index) => ({
-        html: buildSlideHtml(html, tokens, slide, index, proposal.slides.length),
+    run.signal?.throwIfAborted();
+    if (item.format === 'reel') {
+      assets = [`${item.id}/v${iteration}.mp4`];
+      const scenes = proposal.slides.map((slide, index) => {
+        const seconds = sceneSeconds(slide);
+        return { html: build(slide, index, seconds), seconds };
+      });
+      const length = scenes.reduce((sum, scene) => sum + scene.seconds, 0);
+      log(run, 'step', 'Renderizando video', `${total} escenas · ${Math.round(length)} s · ${template.name}`);
+      await ctx.video({
+        scenes,
         width: template.width,
         height: template.height,
-        path: join(ctx.config.dataDir, 'media', assets[index]),
-      })),
-    );
+        path: join(mediaDir, assets[0]),
+        signal: run.signal,
+      });
+    } else {
+      assets = proposal.slides.map((_, index) => `${item.id}/v${iteration}-${index + 1}.jpg`);
+      log(run, 'step', 'Renderizando láminas', `${total} · ${template.name}`);
+      await ctx.renderer(
+        proposal.slides.map((slide, index) => ({
+          html: build(slide, index),
+          width: template.width,
+          height: template.height,
+          path: join(mediaDir, assets[index]),
+        })),
+      );
+    }
+    pruneMedia(join(mediaDir, item.id), assets);
   }
   return ctx.store.updateItem(item.id, {
     copy: proposal.copy,
@@ -303,35 +490,55 @@ function requireItem(ctx: Context, job: Job): Item {
   return item;
 }
 
-async function produce(ctx: Context, job: Job): Promise<Item[]> {
+async function produce(run: Run): Promise<Item[]> {
+  const { ctx, job } = run;
   const item = requireItem(ctx, job);
   if (item.status !== 'idea' && item.status !== 'produciendo') return [];
   ctx.store.updateItem(item.id, { status: 'produciendo' });
-  const proposal = await propose<Proposal>(ctx, job, item, producePrompt(ctx, item), PROPOSAL_SCHEMA);
-  const updated = await applyProposal(ctx, item, proposal);
+  const proposal = await propose<Proposal>(run, item, producePrompt(ctx, item), PROPOSAL_SCHEMA);
+  const updated = await applyProposal(run, item, proposal);
   ctx.store.addEvent(item.id, 'propuesta', `Versión ${updated.iteration}`);
+  log(run, 'step', 'Propuesta lista', `Versión ${updated.iteration}`);
   return [updated];
 }
 
-async function revise(ctx: Context, job: Job): Promise<Item[]> {
+async function revise(run: Run): Promise<Item[]> {
+  const { ctx, job } = run;
   const item = requireItem(ctx, job);
   if (item.status !== 'ajustes') return [];
-  const revision = await propose<Revision>(ctx, job, item, revisePrompt(ctx, item), REVISION_SCHEMA);
-  const updated = await applyProposal(ctx, item, revision);
+  const revision = await propose<Revision>(run, item, revisePrompt(ctx, item), REVISION_SCHEMA);
+  const updated = await applyProposal(run, item, revision);
   ctx.store.addEvent(item.id, 'ajustes', item.notes);
   ctx.store.updateItem(item.id, { notes: '' });
   if (revision.learning?.trim()) ctx.workspace.appendLearning(revision.learning);
+  log(run, 'step', 'Ajustes aplicados', revision.learning?.trim() ?? '');
   return [{ ...updated, notes: '' }];
 }
 
-async function plan(ctx: Context, job: Job): Promise<Item[]> {
+async function plan(run: Run): Promise<Item[]> {
+  const { ctx } = run;
   const { from, to } = nextWeek(new Date(), ctx.config.timezone);
-  const output = (await ctx.executor({
-    agent: job.agent,
-    prompt: planPrompt(ctx, from, to),
-    schema: PLAN_SCHEMA,
-    cwd: ctx.workspace.root,
-  })) as Plan;
+  const prompt = planPrompt(ctx, from, to);
+  let output = await ask<Plan>(run, prompt, PLAN_SCHEMA);
+  if (!Array.isArray(output.items) || !output.items.length) {
+    log(run, 'step', 'El planner no propuso ideas', 'Se le pide de nuevo, sin repetir la investigación.');
+    const research = String(output.research ?? '').slice(0, MAX_RESULT_CHARS);
+    const retry = await ask<Plan>(
+      run,
+      [
+        prompt,
+        'Tu respuesta anterior dejó items vacío. Eso no sirve: la parrilla necesita ideas concretas.',
+        research
+          ? `Ya investigaste. No repitas la búsqueda; usa este research y devuélvelo igual en research:\n${research}`
+          : '',
+        'Devuelve ahora el JSON con items lleno.',
+      ]
+        .filter(Boolean)
+        .join('\n\n'),
+      PLAN_SCHEMA,
+    );
+    output = { items: retry.items, research: retry.research?.trim() ? retry.research : output.research };
+  }
   if (output.research?.trim()) {
     ctx.workspace.write(
       'bases',
@@ -371,21 +578,20 @@ async function plan(ctx: Context, job: Job): Promise<Item[]> {
       }),
     );
   }
-  if (rejected.length) {
-    console.error(`Planner descartó: ${rejected.join('; ')}`);
-  }
+  if (rejected.length) log(run, 'step', 'Ideas descartadas', rejected.join('\n'));
   if (!created.length) {
-    console.error(`Respuesta del planner: ${JSON.stringify(output).slice(0, 4000)}`);
     const detail = ideas.length
       ? `descartó ${rejected.slice(0, 3).join('; ')}`
-      : `la respuesta no trae items: ${JSON.stringify(output).slice(0, 200)}`;
+      : 'no propuso ninguna idea en dos intentos. Abre la ejecución en Actividad para leer su razonamiento';
     throw new Error(`El planner no devolvió ideas válidas: ${detail}`);
   }
+  log(run, 'step', 'Parrilla creada', created.map((item) => `${item.format} · ${item.title}`).join('\n'));
   return created;
 }
 
-export async function runJob(ctx: Context, job: Job): Promise<Item[]> {
-  if (job.action === 'plan') return plan(ctx, job);
-  if (job.action === 'produce') return produce(ctx, job);
-  return revise(ctx, job);
+export async function runJob(ctx: Context, job: Job, signal?: AbortSignal): Promise<Item[]> {
+  const run: Run = { ctx, job, signal };
+  if (job.action === 'plan') return plan(run);
+  if (job.action === 'produce') return produce(run);
+  return revise(run);
 }

@@ -1,7 +1,7 @@
 import { type Context, runJob } from './agents.ts';
 import { CONNECTION_KEY, type InstagramConnection } from './connections.ts';
-import type { Hook } from './db.ts';
-import type { Item } from './domain.ts';
+import type { Hook, Job } from './db.ts';
+import { type Action, type Item, RUNNABLE_FROM, type Slot } from './domain.ts';
 
 const MAX_JOB_ATTEMPTS = 3;
 const RETRY_MINUTES = 10;
@@ -19,25 +19,87 @@ export function dispatchStatusHooks(ctx: Context, item: Item): void {
   }
 }
 
+const running = new Map<string, AbortController>();
+
+function restoreItem(ctx: Context, job: Job): void {
+  const item = job.item_id ? ctx.store.getItem(job.item_id) : null;
+  if (!item) return;
+  if (item.status === 'produciendo') {
+    ctx.store.updateItem(item.id, { status: item.iteration > 0 ? 'revision' : 'idea' });
+  } else if (item.status === 'ajustes') {
+    ctx.store.updateItem(item.id, { status: 'revision' });
+  } else {
+    return;
+  }
+  ctx.store.addEvent(item.id, 'cancelada', 'Ejecución del agente cancelada');
+}
+
+export function cancelJob(ctx: Context, id: string): Job | null {
+  const job = ctx.store.getJob(id);
+  if (!job) return null;
+  if (job.status !== 'queued' && job.status !== 'running') return job;
+  const controller = running.get(id);
+  if (controller) {
+    controller.abort();
+  } else {
+    ctx.store.cancelJob(id);
+    ctx.store.addJobEvent(id, 'step', 'Cancelada', '');
+    restoreItem(ctx, job);
+  }
+  return ctx.store.getJob(id);
+}
+
+export function requestRun(ctx: Context, action: Action, itemId: string | null): Job {
+  const hook = ctx.store.listHooks().find((entry) => entry.action === action);
+  if (!hook) throw new Error('Sin agente para la acción.');
+  if (action === 'plan') return ctx.store.enqueue('plan', hook.agent, null) as Job;
+  const item = itemId ? ctx.store.getItem(itemId) : null;
+  if (!item) throw new Error('La pieza ya no existe.');
+  if (!RUNNABLE_FROM[action].includes(item.status)) {
+    throw new Error('La pieza no está en un estado que permita esta ejecución.');
+  }
+  if (action === 'revise' && !item.notes.trim()) {
+    throw new Error('Escribe las anotaciones antes de pedir ajustes.');
+  }
+  const job = ctx.store.enqueue(action, hook.agent, item.id);
+  if (!job) throw new Error('Ya hay una ejecución en curso para esta pieza.');
+  ctx.store.updateItem(item.id, {
+    status: action === 'produce' ? 'produciendo' : 'ajustes',
+    error: null,
+  });
+  return job;
+}
+
 export async function workOnce(ctx: Context, now = new Date()): Promise<boolean> {
   const job = ctx.store.claimJob(now.toISOString());
   if (!job) return false;
+  const controller = new AbortController();
+  running.set(job.id, controller);
   try {
-    const touched = await runJob(ctx, job);
+    const touched = await runJob(ctx, job, controller.signal);
+    controller.signal.throwIfAborted();
     ctx.store.finishJob(job.id);
     for (const item of touched) dispatchStatusHooks(ctx, item);
   } catch (error) {
     const text = message(error);
-    if (job.attempts < MAX_JOB_ATTEMPTS) {
+    if (controller.signal.aborted) {
+      ctx.store.cancelJob(job.id);
+      ctx.store.addJobEvent(job.id, 'step', 'Cancelada', '');
+      restoreItem(ctx, job);
+    } else if (job.attempts < MAX_JOB_ATTEMPTS) {
       const runAfter = new Date(now.getTime() + job.attempts * RETRY_MINUTES * 60000);
       ctx.store.retryJob(job.id, text, runAfter.toISOString());
+      ctx.store.addJobEvent(job.id, 'error', `Intento ${job.attempts} falló. Se reintenta.`, text);
     } else {
       ctx.store.failJob(job.id, text);
+      ctx.store.addJobEvent(job.id, 'error', 'Falló', text);
       if (job.item_id && ctx.store.getItem(job.item_id)) {
         ctx.store.updateItem(job.item_id, { status: 'error', error: text });
         ctx.store.addEvent(job.item_id, 'error', text);
       }
     }
+  } finally {
+    running.delete(job.id);
   }
   return true;
 }
@@ -59,6 +121,36 @@ export function localClock(now: Date, timezone: string): { date: string; weekday
     weekday: ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].indexOf(get('weekday')),
     time: `${get('hour')}:${get('minute')}`,
   };
+}
+
+function zonedToUtc(date: string, time: string, timezone: string): Date {
+  const guess = new Date(`${date}T${time}:00Z`);
+  const clock = localClock(guess, timezone);
+  const shown = new Date(`${clock.date}T${clock.time}:00Z`);
+  return new Date(guess.getTime() - (shown.getTime() - guess.getTime()));
+}
+
+export function nextSlot(
+  slots: Slot[],
+  taken: string[],
+  now: Date,
+  timezone: string,
+): string | null {
+  const busy = new Set(taken.map((iso) => iso.slice(0, 16)));
+  for (let offset = 0; offset < 28; offset += 1) {
+    const clock = localClock(new Date(now.getTime() + offset * 86400000), timezone);
+    const times = slots
+      .filter((slot) => slot.weekday === clock.weekday)
+      .map((slot) => slot.time)
+      .sort();
+    for (const time of times) {
+      const candidate = zonedToUtc(clock.date, time, timezone);
+      if (candidate > now && !busy.has(candidate.toISOString().slice(0, 16))) {
+        return candidate.toISOString();
+      }
+    }
+  }
+  return null;
 }
 
 export function fireHook(ctx: Context, hook: Hook): void {
@@ -109,6 +201,7 @@ export async function publishDue(ctx: Context, now = new Date()): Promise<void> 
       const published = await ctx.publish(instagramAccount(ctx), {
         format: item.format,
         caption: item.copy,
+        firstComment: item.first_comment,
         mediaUrls: item.assets.map((asset) => `${ctx.config.publicUrl}/media/${asset}`),
       });
       ctx.store.updateItem(item.id, {
@@ -117,6 +210,7 @@ export async function publishDue(ctx: Context, now = new Date()): Promise<void> 
         error: null,
       });
       ctx.store.addEvent(item.id, 'publicada', published.permalink ?? published.id);
+      if (published.warning) ctx.store.addEvent(item.id, 'aviso', published.warning);
     } catch (error) {
       const text = message(error);
       ctx.store.updateItem(item.id, { status: 'error', error: text });
@@ -125,11 +219,12 @@ export async function publishDue(ctx: Context, now = new Date()): Promise<void> 
   }
 }
 
-export function startPipeline(ctx: Context): () => void {
+export function startPipeline(ctx: Context, paused: () => boolean = () => false): () => void {
   let working = false;
   let ticking = false;
+  ctx.store.pruneJobs();
   const worker = setInterval(async () => {
-    if (working) return;
+    if (working || paused()) return;
     working = true;
     try {
       await workOnce(ctx);

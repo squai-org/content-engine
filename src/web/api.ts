@@ -8,8 +8,23 @@ export type Status =
   | 'publicada'
   | 'error';
 export type Format = 'post' | 'carrusel' | 'reel' | 'story';
-export type Slide = { kicker: string; title: string; body: string };
+export type Slide = { kicker: string; title: string; body: string; note?: string; source?: string };
 export type ItemEvent = { id: number; at: string; kind: string; detail: string };
+export type JobStatus = 'queued' | 'running' | 'done' | 'failed' | 'cancelled';
+export type Job = {
+  id: string;
+  action: string;
+  agent: string;
+  item_id: string | null;
+  item_title?: string | null;
+  status: JobStatus;
+  attempts: number;
+  error: string | null;
+  created_at: string;
+  started_at: string | null;
+  finished_at: string | null;
+};
+export type JobEvent = { id: number; at: string; kind: string; name: string; body: string };
 export type Item = {
   id: string;
   title: string;
@@ -28,10 +43,20 @@ export type Item = {
   iteration: number;
   permalink: string | null;
   error: string | null;
+  first_comment: string;
   events?: ItemEvent[];
+  job?: Job | null;
 };
 export type Taxonomy = { pillars: string[]; services: string[]; funnel: string[]; ctas: string[] };
-export type AppStatus = { instagram: boolean; timezone: string; taxonomy: Taxonomy };
+export type Slot = { weekday: number; time: string };
+export type Planning = { pieces: number; slots: Slot[] };
+export type AppStatus = {
+  instagram: boolean;
+  timezone: string;
+  taxonomy: Taxonomy;
+  planning: Planning;
+  paused: string;
+};
 export type Hook = {
   id: string;
   name: string;
@@ -44,15 +69,47 @@ export type Hook = {
   enabled: boolean;
   last_fired: string | null;
 };
-export type Job = {
+export type TemplatePreview = { width: number; height: number; formats: string[]; slides: string[] };
+export type Sample = { at: number; cpu: number; memory: number };
+export type ServerSnapshot = {
+  limits: { ocpu: number; memoryGb: number; storageGb: number; egressTb: number };
+  cpu: { used: number; cores: number; load: number };
+  memory: { used: number; total: number };
+  disk: { total: number; used: number; media: number; workspace: number; database: number };
+  egress: { month: string; bytes: number };
+  uptime: number;
+  jobsToday: number;
+  warnings: string[];
+  history: Sample[];
+};
+export type MediaInsight = {
   id: string;
-  action: string;
-  agent: string;
-  item_id: string | null;
-  status: 'queued' | 'running' | 'done' | 'failed';
-  attempts: number;
-  error: string | null;
-  created_at: string;
+  caption: string;
+  type: string;
+  permalink: string;
+  thumbnail: string;
+  timestamp: string;
+  likes: number;
+  comments: number;
+  reach: number | null;
+  saved: number | null;
+  shares: number | null;
+  views: number | null;
+};
+export type Insights = {
+  fetchedAt: number;
+  username: string;
+  followers: number;
+  mediaCount: number;
+  media: MediaInsight[];
+  warning: string;
+};
+export type InstagramConnection = {
+  configured: boolean;
+  redirectUri: string;
+  connected: boolean;
+  username: string | null;
+  expiresAt: number | null;
 };
 
 export const STATUS_LABEL: Record<Status, string> = {
@@ -71,6 +128,19 @@ export const FORMAT_LABEL: Record<Format, string> = {
   reel: 'Reel',
   story: 'Story',
 };
+export const JOB_LABEL: Record<JobStatus, string> = {
+  queued: 'En cola',
+  running: 'En curso',
+  done: 'Hecho',
+  failed: 'Falló',
+  cancelled: 'Cancelada',
+};
+export const ACTION_LABEL: Record<string, string> = {
+  plan: 'Planear semana',
+  produce: 'Producir propuesta',
+  revise: 'Aplicar ajustes',
+};
+export const WEEKDAYS = ['Domingo', 'Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes', 'Sábado'];
 
 export class Unauthorized extends Error {}
 
@@ -96,10 +166,10 @@ export async function upload(itemId: string, file: File): Promise<Item> {
   return data;
 }
 
-export type InstagramConnection = {
-  configured: boolean;
-  redirectUri: string;
-  connected: boolean;
-  username: string | null;
-  expiresAt: number | null;
-};
+export function isVideo(asset: string): boolean {
+  return /\.(mp4|mov)$/i.test(asset);
+}
+
+export function isBusy(status: JobStatus): boolean {
+  return status === 'queued' || status === 'running';
+}

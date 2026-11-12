@@ -2,9 +2,11 @@ import { randomUUID } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 import {
   type Action,
+  DEFAULT_PLANNING,
   DEFAULT_TAXONOMY,
   type Format,
   type Item,
+  type Planning,
   type Spec,
   type Status,
   type Taxonomy,
@@ -15,14 +17,17 @@ export type Job = {
   action: Action;
   agent: string;
   item_id: string | null;
-  status: 'queued' | 'running' | 'done' | 'failed';
+  status: 'queued' | 'running' | 'done' | 'failed' | 'cancelled';
   attempts: number;
   run_after: string;
   error: string | null;
   created_at: string;
   started_at: string | null;
   finished_at: string | null;
+  item_title?: string | null;
 };
+
+export type JobEvent = { id: number; job_id: string; at: string; kind: string; name: string; body: string };
 
 export type Hook = {
   id: string;
@@ -97,6 +102,15 @@ CREATE TABLE IF NOT EXISTS jobs (
   started_at TEXT,
   finished_at TEXT
 );
+CREATE TABLE IF NOT EXISTS job_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  job_id TEXT NOT NULL,
+  at TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  name TEXT NOT NULL DEFAULT '',
+  body TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS job_events_job ON job_events (job_id, id);
 CREATE TABLE IF NOT EXISTS hooks (
   id TEXT PRIMARY KEY,
   name TEXT NOT NULL,
@@ -148,6 +162,9 @@ const DEFAULT_HOOKS: Omit<Hook, 'last_fired'>[] = [
   },
 ];
 
+const MAX_EVENT_BODY = 20000;
+const KEEP_JOBS = 300;
+
 const ITEM_COLUMNS = [
   'title',
   'message',
@@ -165,6 +182,7 @@ const ITEM_COLUMNS = [
   'iteration',
   'permalink',
   'error',
+  'first_comment',
 ] as const;
 
 export type ItemPatch = Partial<Pick<Item, (typeof ITEM_COLUMNS)[number]>>;
@@ -184,6 +202,10 @@ function toHook(row: Row): Hook {
 export function createStore(path: string) {
   const db = new DatabaseSync(path);
   db.exec(SCHEMA);
+  const itemColumns = db.prepare('PRAGMA table_info(items)').all() as Row[];
+  if (!itemColumns.some((column) => column.name === 'first_comment')) {
+    db.exec(`ALTER TABLE items ADD COLUMN first_comment TEXT NOT NULL DEFAULT ''`);
+  }
   const insertHook = db.prepare(
     `INSERT OR IGNORE INTO hooks (id, name, trigger, status, weekday, time, action, agent, enabled)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -314,7 +336,10 @@ export function createStore(path: string) {
     deleteItem(id: string): void {
       db.prepare('DELETE FROM items WHERE id = ?').run(id);
       db.prepare('DELETE FROM item_events WHERE item_id = ?').run(id);
-      db.prepare(`DELETE FROM jobs WHERE item_id = ? AND status = 'queued'`).run(id);
+      db.prepare(`UPDATE jobs SET status = 'cancelled', finished_at = ? WHERE item_id = ? AND status = 'queued'`).run(
+        now(),
+        id,
+      );
     },
 
     listEvents(itemId: string): ItemEvent[] {
@@ -376,10 +401,63 @@ export function createStore(path: string) {
       );
     },
 
+    cancelJob(id: string): void {
+      db.prepare(
+        `UPDATE jobs SET status = 'cancelled', finished_at = ? WHERE id = ? AND status IN ('queued', 'running')`,
+      ).run(now(), id);
+    },
+
+    getJob(id: string): Job | null {
+      const row = db
+        .prepare(
+          'SELECT jobs.*, items.title AS item_title FROM jobs LEFT JOIN items ON items.id = jobs.item_id WHERE jobs.id = ?',
+        )
+        .get(id) as Row | undefined;
+      return row ? (row as unknown as Job) : null;
+    },
+
     listJobs(limit = 50): Job[] {
       return db
-        .prepare('SELECT * FROM jobs ORDER BY created_at DESC LIMIT ?')
+        .prepare(
+          'SELECT jobs.*, items.title AS item_title FROM jobs LEFT JOIN items ON items.id = jobs.item_id ORDER BY jobs.created_at DESC, jobs.rowid DESC LIMIT ?',
+        )
         .all(limit) as unknown as Job[];
+    },
+
+    latestJob(itemId: string): Job | null {
+      const row = db
+        .prepare('SELECT * FROM jobs WHERE item_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 1')
+        .get(itemId) as Row | undefined;
+      return row ? (row as unknown as Job) : null;
+    },
+
+    countJobsSince(sinceIso: string): number {
+      const row = db.prepare('SELECT COUNT(*) AS total FROM jobs WHERE created_at >= ?').get(sinceIso) as Row;
+      return Number(row.total);
+    },
+
+    addJobEvent(jobId: string, kind: string, name: string, body: string): void {
+      db.prepare('INSERT INTO job_events (job_id, at, kind, name, body) VALUES (?, ?, ?, ?, ?)').run(
+        jobId,
+        now(),
+        kind,
+        name,
+        body.slice(0, MAX_EVENT_BODY),
+      );
+    },
+
+    listJobEvents(jobId: string, afterId = 0): JobEvent[] {
+      return db
+        .prepare('SELECT * FROM job_events WHERE job_id = ? AND id > ? ORDER BY id')
+        .all(jobId, afterId) as unknown as JobEvent[];
+    },
+
+    pruneJobs(keep = KEEP_JOBS): void {
+      db.prepare(
+        `DELETE FROM jobs WHERE status IN ('done', 'failed', 'cancelled')
+         AND id NOT IN (SELECT id FROM jobs ORDER BY created_at DESC LIMIT ?)`,
+      ).run(keep);
+      db.exec('DELETE FROM job_events WHERE job_id NOT IN (SELECT id FROM jobs)');
     },
 
     listHooks(): Hook[] {
@@ -424,6 +502,10 @@ export function createStore(path: string) {
 
     getTaxonomy(): Taxonomy {
       return getSetting('taxonomy', DEFAULT_TAXONOMY);
+    },
+
+    getPlanning(): Planning {
+      return { ...DEFAULT_PLANNING, ...getSetting<Partial<Planning>>('planning', {}) };
     },
 
     close(): void {
