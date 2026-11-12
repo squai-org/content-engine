@@ -211,6 +211,16 @@ test('planner crea ideas y encola producción', async () => {
               scheduled_at: '2026-11-17T12:00:00-05:00',
             },
             { title: 'Sin fecha', format: 'post', scheduled_at: 'mañana' },
+            {
+              title: 'Carrusel con mayúscula',
+              message: 'm',
+              pillar: 'Anti-humo',
+              format: 'Carrusel',
+              service: 'One',
+              funnel: 'TOFU',
+              cta: 'Lista de espera',
+              scheduled_at: '2026-11-18T12:00:00-05:00',
+            },
           ],
           research: '- Cierre de año: el lector planea 2027 (https://ejemplo.test/fuente).',
         }
@@ -221,12 +231,28 @@ test('planner crea ideas y encola producción', async () => {
   assert.equal(ctx.store.listJobs().length, 1);
   await workOnce(ctx);
   const items = ctx.store.listItems();
-  assert.equal(items.length, 1);
+  assert.equal(items.length, 2);
   assert.equal(items[0].scheduled_at, '2026-11-17T17:00:00.000Z');
-  assert.equal(ctx.store.listJobs().filter((job) => job.action === 'produce').length, 1);
+  assert.equal(items[1].format, 'carrusel');
+  assert.equal(ctx.store.listJobs().filter((job) => job.action === 'produce').length, 2);
   const research = readFileSync(join(ctx.workspace.root, 'bases/research-semanal.md'), 'utf8');
   assert.match(research, /^# Research semanal\n\nSemana del 2026-11-1\d al 2026-11-2\d\./);
   assert.match(research, /Cierre de año/);
+});
+
+test('el error del planner explica qué descartó', async () => {
+  const { ctx } = setup(async () => ({
+    items: [{ title: 'Idea rara', format: 'Infografía', scheduled_at: '2026-11-17T12:00:00-05:00' }],
+    research: '',
+  }));
+  ctx.store.enqueue('plan', 'planner', null);
+  await workOnce(ctx);
+  assert.match(ctx.store.listJobs()[0].error ?? '', /"Idea rara" con formato "Infografía"/);
+
+  const empty = setup(async () => ({ ideas: [], research: '' })).ctx;
+  empty.store.enqueue('plan', 'planner', null);
+  await workOnce(empty);
+  assert.match(empty.store.listJobs()[0].error ?? '', /no trae items: \{"ideas":\[\]/);
 });
 
 test('no publica piezas vencidas hace más de un día', async () => {

@@ -2,7 +2,7 @@ import { execFile } from 'node:child_process';
 import { join } from 'node:path';
 import type { Config } from './config.ts';
 import type { Job, Store } from './db.ts';
-import { FORMATS, type Item, isFormat, proposalViolations, type Slide } from './domain.ts';
+import { FORMATS, type Item, normalizeFormat, proposalViolations, type Slide } from './domain.ts';
 import type { Publish } from './publisher.ts';
 import { buildSlideHtml, type Renderer } from './render.ts';
 import type { Workspace } from './workspace.ts';
@@ -339,16 +339,31 @@ async function plan(ctx: Context, job: Job): Promise<Item[]> {
       `# Research semanal\n\nSemana del ${from} al ${to}. Lo escribe el planner y se reemplaza cada semana.\n\n${output.research.trim()}\n`,
     );
   }
+  const ideas = Array.isArray(output.items) ? output.items : [];
   const created: Item[] = [];
-  for (const idea of output.items ?? []) {
+  const rejected: string[] = [];
+  for (const idea of ideas) {
+    const title = String(idea.title ?? '').trim();
+    const format = normalizeFormat(idea.format);
     const date = new Date(idea.scheduled_at);
-    if (!idea.title?.trim() || !isFormat(idea.format) || Number.isNaN(date.getTime())) continue;
+    if (!title) {
+      rejected.push('una idea sin título');
+      continue;
+    }
+    if (!format) {
+      rejected.push(`"${title}" con formato "${idea.format}"`);
+      continue;
+    }
+    if (Number.isNaN(date.getTime())) {
+      rejected.push(`"${title}" con fecha "${idea.scheduled_at}"`);
+      continue;
+    }
     created.push(
       ctx.store.createItem({
-        title: idea.title.trim(),
+        title,
         message: idea.message,
         pillar: idea.pillar,
-        format: idea.format,
+        format,
         service: idea.service,
         funnel: idea.funnel,
         cta: idea.cta,
@@ -356,7 +371,16 @@ async function plan(ctx: Context, job: Job): Promise<Item[]> {
       }),
     );
   }
-  if (!created.length) throw new Error('El planner no devolvió ideas válidas.');
+  if (rejected.length) {
+    console.error(`Planner descartó: ${rejected.join('; ')}`);
+  }
+  if (!created.length) {
+    console.error(`Respuesta del planner: ${JSON.stringify(output).slice(0, 4000)}`);
+    const detail = ideas.length
+      ? `descartó ${rejected.slice(0, 3).join('; ')}`
+      : `la respuesta no trae items: ${JSON.stringify(output).slice(0, 200)}`;
+    throw new Error(`El planner no devolvió ideas válidas: ${detail}`);
+  }
   return created;
 }
 
