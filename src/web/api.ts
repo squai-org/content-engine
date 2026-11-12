@@ -44,6 +44,7 @@ export type Item = {
   permalink: string | null;
   error: string | null;
   first_comment: string;
+  footage: string;
   events?: ItemEvent[];
   job?: Job | null;
 };
@@ -69,19 +70,17 @@ export type Hook = {
   enabled: boolean;
   last_fired: string | null;
 };
-export type Engine = 'nativo' | 'hyperframes' | 'remotion';
+export type Engine = 'nativo' | 'hyperframes';
 export type TemplatePreview = {
   width: number;
   height: number;
   formats: string[];
   engine: Engine;
+  footage: boolean;
+  duration?: number;
   slides: string[];
 };
-export const ENGINE_LABEL: Record<Engine, string> = {
-  nativo: 'CSS',
-  hyperframes: 'HyperFrames',
-  remotion: 'Remotion',
-};
+export type Notice = { id: number; text: string; busy?: boolean; error?: boolean; video?: string };
 export type Sample = { at: number; cpu: number; memory: number };
 export type ServerSnapshot = {
   limits: { ocpu: number; memoryGb: number; storageGb: number; egressTb: number };
@@ -171,6 +170,16 @@ export async function api<T>(path: string, method = 'GET', body?: unknown): Prom
 export async function upload(itemId: string, file: File): Promise<Item> {
   const response = await fetch(
     `/api/items/${itemId}/assets?name=${encodeURIComponent(file.name)}`,
+    { method: 'POST', body: file },
+  );
+  const data = (await response.json()) as Item & { error?: string };
+  if (!response.ok) throw new Error(data.error ?? `Error ${response.status}`);
+  return data;
+}
+
+export async function uploadFootage(itemId: string, file: File): Promise<Item> {
+  const response = await fetch(
+    `/api/items/${itemId}/footage?name=${encodeURIComponent(file.name)}`,
     { method: 'POST', body: file },
   );
   const data = (await response.json()) as Item & { error?: string };

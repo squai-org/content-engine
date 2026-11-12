@@ -6,7 +6,7 @@ import {
   useRef,
   useState,
 } from 'react';
-import { isVideo, type Item } from './api.ts';
+import { isVideo, type Item, type Notice } from './api.ts';
 
 const ICONS: Record<string, string> = {
   calendar: 'M7 3v3M17 3v3M4 9h16M6 5h12a2 2 0 0 1 2 2v11a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2Z',
@@ -27,6 +27,8 @@ const ICONS: Record<string, string> = {
   down: 'M5 9l7 7 7-7',
   play: 'M7 4.5v15l12-7.5Z',
   stop: 'M7 7h10v10H7Z',
+  pause: 'M8 5v14M16 5v14',
+  minus: 'M5 12h14',
   refresh: 'M20 11a8 8 0 0 0-14.5-4.5L4 8M4 4v4h4M4 13a8 8 0 0 0 14.5 4.5L20 16M20 20v-4h-4',
   trash: 'M5 7h14M10 7V4h4v3M7 7l1 13h8l1-13',
   clock: 'M12 7v5l3 2M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18Z',
@@ -416,8 +418,9 @@ export function Markdown({ source }: { source: string }) {
       }
       const Tag = ordered ? 'ol' : 'ul';
       const id = key();
+      const first = ordered ? Number(/^\s*(\d+)\./.exec(line)?.[1] ?? 1) : undefined;
       blocks.push(
-        <Tag key={id}>
+        <Tag key={id} start={first}>
           {entries.map((entry, entryIndex) => (
             <li key={`${id}-${entryIndex}`}>{inline(entry, `${id}-${entryIndex}`)}</li>
           ))}
@@ -445,4 +448,118 @@ export function Markdown({ source }: { source: string }) {
     blocks.push(<p key={key()}>{inline(paragraph.join(' '), key())}</p>);
   }
   return <div className="prose">{blocks}</div>;
+}
+
+function clock(seconds: number): string {
+  const whole = Math.max(0, Math.floor(seconds));
+  return `${Math.floor(whole / 60)}:${String(whole % 60).padStart(2, '0')}`;
+}
+
+export function Player({
+  html,
+  width,
+  height,
+  fit,
+  duration,
+}: {
+  html: string;
+  width: number;
+  height: number;
+  fit: number;
+  duration: number;
+}) {
+  const frame = useRef<HTMLIFrameElement>(null);
+  const [time, setTime] = useState(0);
+  const [playing, setPlaying] = useState(true);
+  const scale = fit / height;
+
+  useEffect(() => {
+    const onMessage = (event: MessageEvent) => {
+      if (event.source !== frame.current?.contentWindow) return;
+      const state = (event.data as { player?: { time: number; playing: boolean } }).player;
+      if (!state) return;
+      setTime(state.time);
+      setPlaying(state.playing);
+    };
+    window.addEventListener('message', onMessage);
+    return () => window.removeEventListener('message', onMessage);
+  }, []);
+
+  const send = (player: Record<string, unknown>) => frame.current?.contentWindow?.postMessage({ player }, '*');
+
+  return (
+    <div className="player" style={{ width: width * scale }}>
+      <div className="frame" style={{ width: width * scale, height: fit }}>
+        <iframe
+          ref={frame}
+          title="Vista previa"
+          sandbox="allow-scripts"
+          srcDoc={html}
+          width={width}
+          height={height}
+          style={{ transform: `scale(${scale})` }}
+        />
+      </div>
+      <div className="player-bar">
+        <button
+          type="button"
+          className="round"
+          aria-label={playing ? 'Pausar' : 'Reproducir'}
+          onClick={() => send(playing ? { pause: true } : { play: true })}
+        >
+          <Icon name={playing ? 'pause' : 'play'} size={13} />
+        </button>
+        <input
+          type="range"
+          min={0}
+          max={duration}
+          step={0.05}
+          value={Math.min(time, duration)}
+          aria-label="Posición"
+          onChange={(event) => send({ seek: Number(event.target.value) })}
+        />
+        <span className="muted">
+          {clock(time)} / {clock(duration)}
+        </span>
+      </div>
+    </div>
+  );
+}
+
+export function Toasts({
+  notices,
+  onDismiss,
+  onOpen,
+}: {
+  notices: Notice[];
+  onDismiss: (id: number) => void;
+  onOpen: (notice: Notice) => void;
+}) {
+  if (!notices.length) return null;
+  return (
+    <div className="toasts" role="status" aria-live="polite">
+      {notices.map((notice) => (
+        <div key={notice.id} className={`toast${notice.error ? ' error' : ''}`}>
+          {notice.busy && (
+            <span className="typing">
+              <i />
+              <i />
+              <i />
+            </span>
+          )}
+          <span>{notice.text}</span>
+          {notice.video && (
+            <button type="button" className="plain" onClick={() => onOpen(notice)}>
+              Ver video
+            </button>
+          )}
+          {!notice.busy && (
+            <button type="button" className="round" aria-label="Cerrar aviso" onClick={() => onDismiss(notice.id)}>
+              <Icon name="close" size={12} />
+            </button>
+          )}
+        </div>
+      ))}
+    </div>
+  );
 }

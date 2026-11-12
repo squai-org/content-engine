@@ -85,24 +85,30 @@ Un template es un HTML con dos etiquetas `meta`: `size` (por ejemplo `1080x1350`
 | `{{kicker}}`, `{{title}}`, `{{body}}`, `{{note}}`, `{{source}}` | Texto de la lámina. `[[frase]]` en `title` o `body` sale como `<mark>`. |
 | `{{index}}`, `{{total}}`, `{{position}}` | Número de lámina, total y `first`, `middle`, `last` o `single`. |
 | `{{service}}` | Servicio de la pieza. |
-| `{{seconds}}` | Duración de la escena en un reel. |
 | `{{tokens}}` | Contenido de `tokens.css`. |
 
 ### Reels
 
-En un reel cada lámina es una escena. La etiqueta `meta` `engine` del template elige el motor que exporta el MP4 a 30 fps:
+Los reels se exportan con [HyperFrames](https://github.com/heygen-com/hyperframes): el template es un HTML con una línea de tiempo de GSAP registrada en `window.__timelines`, y HyperFrames la recorre cuadro a cuadro hasta un MP4 a 30 fps. Un template de reel lleva `<meta name="engine" content="hyperframes">`.
 
-| Motor | Template | Cómo anima |
-| --- | --- | --- |
-| `hyperframes` | HTML con una línea de tiempo de GSAP registrada en `window.__timelines` | [HyperFrames](https://github.com/heygen-com/hyperframes) recorre la línea de tiempo cuadro a cuadro |
-| `remotion` | Archivo `.tsx` que exporta por defecto un componente de React | [Remotion](https://www.remotion.dev) lo compila y lo renderiza |
-| sin etiqueta | HTML con animaciones CSS, una página por escena | El servidor recorre las animaciones cuadro a cuadro |
+Cada lámina es una escena. El template recibe en `{{data}}` el objeto `service`, `duration` y `scenes` (`kicker`, `title`, `body`, `note`, `source`, `start`, `seconds`), y la duración total en `{{duration}}`.
 
-Los templates de `hyperframes` reciben las escenas en `{{data}}` (`service`, `duration` y `scenes` con `kicker`, `title`, `body`, `note`, `source`, `start` y `seconds`) y la duración total en `{{duration}}`. Los de `remotion` reciben el mismo objeto como props. En un `.tsx` las etiquetas `meta` van dentro de un comentario al inicio.
+En Templates, la vista previa de un reel tiene controles de reproducción, y «Exportar muestra» genera un MP4 de prueba. El aviso del render aparece en toda la app.
 
-En Templates, «Renderizar muestra» exporta un video de prueba con el motor del template.
+HyperFrames usa licencia Apache 2.0 y GSAP su licencia estándar sin costo.
 
-Remotion es gratuito para personas y empresas de hasta 3 empleados. Una empresa más grande necesita su [licencia de empresa](https://www.remotion.dev/docs/license). HyperFrames usa licencia Apache 2.0 y GSAP su licencia estándar sin costo.
+### Video grabado
+
+Un reel admite una grabación subida desde la pieza. Al subirla, el productor corre de nuevo y la ejecución hace cuatro pasos, visibles en Actividad:
+
+1. Convierte el video a 1080×1920, 30 fps, H.264. El original se borra.
+2. Transcribe el audio palabra por palabra con Whisper local, a través de `hyperframes transcribe`.
+3. El agente recibe la transcripción y devuelve el plan de edición: recorte, correcciones, palabras resaltadas, título, animaciones y cierre.
+4. HyperFrames compone el video sobre la grabación.
+
+Los templates de video grabado llevan `<meta name="footage" content="si">` y reciben además `footage` (`src` y `start`) y `edit` (`hook`, `cta`, `words`, `captions`, `moments`). En HyperFrames, `{{footage}}` y `{{media_start}}` llenan la etiqueta `video`.
+
+La primera transcripción compila whisper.cpp y descarga el modelo (unos 500 MB con `small`) en la carpeta del usuario del servicio. Necesita `cmake`, un compilador de C++ y salida a `huggingface.co`.
 
 ## Límites de Oracle
 
@@ -128,7 +134,9 @@ La sección Servidor muestra procesador, memoria, disco y tráfico de salida fre
 | `CLAUDE_BIN` | Ruta de Claude Code. |
 | `CHROMIUM_PATH` | Ruta de Chromium. |
 | `FFMPEG_PATH` | Ruta de ffmpeg. Por defecto `ffmpeg`. |
-| `HEADLESS_SHELL_PATH` | Ruta de Chrome Headless Shell para HyperFrames y Remotion. Por defecto usa el que instala Playwright. |
+| `TRANSCRIBE_MODEL` | Modelo de Whisper. Por defecto `small`. `medium` acierta más y tarda más. |
+| `TRANSCRIBE_LANGUAGE` | Idioma del audio. Por defecto `es`. |
+| `HEADLESS_SHELL_PATH` | Ruta de Chrome Headless Shell para HyperFrames. Por defecto usa el que instala Playwright. |
 | `IG_APP_ID` | App ID de Meta. |
 | `IG_APP_SECRET` | App secret de Meta. |
 | `IG_CONFIG_ID` | Configuration ID de Unified Login. |

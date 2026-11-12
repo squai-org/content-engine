@@ -17,7 +17,26 @@ export const ACTIONS = ['plan', 'produce', 'revise'] as const;
 export type Action = (typeof ACTIONS)[number];
 
 export type Slide = { kicker: string; title: string; body: string; note?: string; source?: string };
-export type Spec = { template: string; slides: Slide[]; script: string };
+export type Word = { text: string; start: number; end: number };
+export type MomentKind = 'keyword' | 'zoom' | 'note';
+export const MOMENT_KINDS: MomentKind[] = ['keyword', 'zoom', 'note'];
+export type EditPlan = {
+  trim: { start: number; end: number };
+  fixes: { from: number; to: number; text: string }[];
+  emphasis: number[];
+  hook: string;
+  cta: string;
+  moments: { word: number; seconds: number; kind: MomentKind; text: string }[];
+};
+export type Edit = {
+  hook: string;
+  cta: string;
+  words: (Word & { strong: boolean })[];
+  captions: { start: number; end: number; words: number[] }[];
+  moments: { start: number; seconds: number; kind: MomentKind; text: string }[];
+};
+export type Transcript = { duration: number; words: Word[] };
+export type Spec = { template: string; slides: Slide[]; script: string; edit?: EditPlan };
 
 export type Item = {
   id: string;
@@ -39,6 +58,7 @@ export type Item = {
   permalink: string | null;
   error: string | null;
   first_comment: string;
+  footage: string;
   created_at: string;
   updated_at: string;
 };
@@ -155,4 +175,122 @@ export function sceneSeconds(slide: Slide): number {
     .filter(Boolean).length;
   const seconds = 1.2 + words / WORDS_PER_SECOND;
   return Math.round(Math.min(MAX_SCENE_SECONDS, Math.max(MIN_SCENE_SECONDS, seconds)) * 10) / 10;
+}
+
+const CAPTION_WORDS = 3;
+const CAPTION_CHARS = 16;
+const CAPTION_GAP = 0.45;
+const MIN_CUT_SECONDS = 3;
+const MAX_MOMENTS = 10;
+const MAX_HOOK_WORDS = 9;
+const round = (value: number) => Math.round(value * 100) / 100;
+
+export function normalizePlan(input: Partial<EditPlan>, transcript: Transcript): EditPlan {
+  const last = transcript.words.length - 1;
+  const index = (value: unknown) => Math.min(last, Math.max(0, Math.round(Number(value) || 0)));
+  let start = Math.max(0, Number(input.trim?.start) || 0);
+  let end = Math.min(transcript.duration, Number(input.trim?.end) || transcript.duration);
+  if (end - start < MIN_CUT_SECONDS) {
+    start = 0;
+    end = transcript.duration;
+  }
+  return {
+    trim: { start: round(start), end: round(end) },
+    fixes: (Array.isArray(input.fixes) ? input.fixes : [])
+      .map((fix) => ({ from: index(fix.from), to: index(fix.to), text: String(fix.text ?? '').trim() }))
+      .filter((fix) => fix.to >= fix.from),
+    emphasis: (Array.isArray(input.emphasis) ? input.emphasis : []).map(index),
+    hook: String(input.hook ?? '').trim(),
+    cta: String(input.cta ?? '').trim(),
+    moments: (Array.isArray(input.moments) ? input.moments : [])
+      .filter((moment) => MOMENT_KINDS.includes(moment.kind))
+      .map((moment) => ({
+        word: index(moment.word),
+        seconds: Math.min(3, Math.max(1.2, Number(moment.seconds) || 2)),
+        kind: moment.kind,
+        text: moment.kind === 'zoom' ? '' : String(moment.text ?? '').trim(),
+      })),
+  };
+}
+
+export function planViolations(plan: EditPlan, copy: string): string[] {
+  const problems = proposalViolations('reel', copy, [
+    { kicker: '', title: plan.hook || 'x', body: plan.cta },
+    ...plan.moments.map((moment) => ({ kicker: '', title: moment.text || 'x', body: '' })),
+    { kicker: '', title: 'x', body: '' },
+  ]);
+  const words = plan.hook.replace(/\[\[|\]\]/g, '').split(/\s+/).filter(Boolean).length;
+  if (!words) problems.push('Falta hook: el título que abre el video.');
+  if (words > MAX_HOOK_WORDS) problems.push(`hook admite máximo ${MAX_HOOK_WORDS} palabras.`);
+  if (plan.moments.length > MAX_MOMENTS) problems.push(`moments admite máximo ${MAX_MOMENTS}.`);
+  if (plan.moments.some((moment) => moment.kind !== 'zoom' && !moment.text)) {
+    problems.push('Cada moment de tipo keyword o note necesita text.');
+  }
+  return problems;
+}
+
+export function buildEdit(transcript: Transcript, plan: EditPlan): { duration: number; edit: Edit } {
+  const fixed = new Map<number, EditPlan['fixes'][number]>();
+  for (const fix of plan.fixes) fixed.set(fix.from, fix);
+  const strong = new Set(plan.emphasis);
+  const all: (Word & { strong: boolean; origin: number })[] = [];
+  for (let index = 0; index < transcript.words.length; index += 1) {
+    const fix = fixed.get(index);
+    if (!fix) {
+      all.push({ ...transcript.words[index], strong: strong.has(index), origin: index });
+      continue;
+    }
+    const from = transcript.words[fix.from].start;
+    const to = transcript.words[fix.to].end;
+    const tokens = fix.text.split(/\s+/).filter(Boolean);
+    const marked = Array.from({ length: fix.to - fix.from + 1 }, (_, offset) => fix.from + offset).some(
+      (origin) => strong.has(origin),
+    );
+    tokens.forEach((text, position) => {
+      all.push({
+        text,
+        start: round(from + ((to - from) * position) / tokens.length),
+        end: round(from + ((to - from) * (position + 1)) / tokens.length),
+        strong: marked,
+        origin: fix.from,
+      });
+    });
+    index = fix.to;
+  }
+  const { start, end } = plan.trim;
+  const kept = all.filter((word) => word.start >= start - 0.05 && word.end <= end + 0.05);
+  const words = kept.map((word) => ({
+    text: word.text,
+    start: round(Math.max(0, word.start - start)),
+    end: round(word.end - start),
+    strong: word.strong,
+  }));
+  const captions: Edit['captions'] = [];
+  let group: number[] = [];
+  const close = () => {
+    if (!group.length) return;
+    captions.push({ start: words[group[0]].start, end: round(words[group[group.length - 1]].end + 0.15), words: group });
+    group = [];
+  };
+  words.forEach((word, index) => {
+    const length = group.reduce((sum, entry) => sum + words[entry].text.length + 1, 0) + word.text.length;
+    if (group.length && length > CAPTION_CHARS) close();
+    group.push(index);
+    const next = words[index + 1];
+    if (group.length >= CAPTION_WORDS || /[.?!,;:]$/.test(word.text) || !next || next.start - word.end > CAPTION_GAP) {
+      close();
+    }
+  });
+  captions.forEach((caption, index) => {
+    const next = captions[index + 1];
+    if (next && next.start - caption.end < 0.6) caption.end = next.start;
+  });
+  const moments = plan.moments
+    .map((moment) => {
+      const word = all.find((entry) => entry.origin >= moment.word) ?? all[all.length - 1];
+      return { start: round((word?.start ?? start) - start), seconds: moment.seconds, kind: moment.kind, text: moment.text };
+    })
+    .filter((moment) => moment.start >= 0 && moment.start < end - start)
+    .sort((a, b) => a.start - b.start);
+  return { duration: round(end - start), edit: { hook: plan.hook, cta: plan.cta, words, captions, moments } };
 }

@@ -7,9 +7,9 @@ import { loadConfig } from './config.ts';
 import { createStore } from './db.ts';
 import { startPipeline } from './pipeline.ts';
 import { instagramPublisher } from './publisher.ts';
-import { videoComposer } from './engines.ts';
+import { mediaTools, videoComposer } from './engines.ts';
 import { createMonitor } from './monitor.ts';
-import { chromiumRenderer, chromiumVideoRenderer } from './render.ts';
+import { chromiumRenderer } from './render.ts';
 import { createWorkspace } from './workspace.ts';
 
 const config = loadConfig();
@@ -23,8 +23,8 @@ const ctx: Context = {
   workspace,
   executor: claudeExecutor(config.claudeBin),
   renderer: chromiumRenderer(config.chromiumPath),
-  video: chromiumVideoRenderer(config.chromiumPath, config.ffmpegPath),
   compose: videoComposer(config, workspace.tokens),
+  media: mediaTools(config),
   publish: instagramPublisher(),
   monitor: createMonitor(config, store),
 };

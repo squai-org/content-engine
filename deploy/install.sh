@@ -38,14 +38,14 @@ esac
 
 install_packages() {
   if [ "$FAMILY" = rhel ]; then
-    dnf install -y ca-certificates curl git openssl sqlite tar unzip xz fontconfig
+    dnf install -y ca-certificates curl git openssl sqlite tar unzip xz fontconfig cmake gcc-c++ make
     dnf install -y --skip-broken nss nspr atk at-spi2-atk cups-libs libdrm libxkbcommon \
       libXcomposite libXdamage libXfixes libXrandr libXext libX11 libxcb mesa-libgbm \
       pango cairo alsa-lib
   else
     export DEBIAN_FRONTEND=noninteractive
     apt-get update -y
-    apt-get install -y ca-certificates curl git openssl sqlite3 fonts-inter ffmpeg xz-utils
+    apt-get install -y ca-certificates curl git openssl sqlite3 fonts-inter ffmpeg xz-utils cmake g++ make
   fi
 }
 

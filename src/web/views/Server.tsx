@@ -55,16 +55,11 @@ export function Server() {
     { label: 'Base de datos', bytes: disk.database, tone: 'teal' },
     { label: 'Sistema y otros', bytes: other, tone: 'gray' },
   ];
-  const healthy = data.warnings.length === 0;
 
   return (
     <section className="view">
       <header className="toolbar">
         <h1 className="title">Servidor</h1>
-        <div className="spacer" />
-        <span className={`pill ${healthy ? 'j-done' : 'j-failed'}`}>
-          {healthy ? 'Dentro de la capa gratuita' : 'Requiere atención'}
-        </span>
       </header>
       <div className="scroll">
         {data.warnings.map((warning) => (

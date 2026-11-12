@@ -1,6 +1,6 @@
 import { type FormEvent, useCallback, useEffect, useState } from 'react';
-import { type AppStatus, api, type Item, Unauthorized } from './api.ts';
-import { Icon } from './ui.tsx';
+import { type AppStatus, api, type Item, type Notice, Unauthorized } from './api.ts';
+import { Icon, Modal, Toasts } from './ui.tsx';
 import { Activity } from './views/Activity.tsx';
 import { Analytics } from './views/Analytics.tsx';
 import { Automation } from './views/Automation.tsx';
@@ -100,6 +100,28 @@ export function App() {
   const [selected, setSelected] = useState<string | null>(null);
   const [draft, setDraft] = useState<Draft | null>(null);
   const [job, setJob] = useState<string | null>(null);
+  const [notices, setNotices] = useState<Notice[]>([]);
+  const [watching, setWatching] = useState<string | null>(null);
+
+  const dismiss = useCallback((id: number) => {
+    setNotices((current) => current.filter((notice) => notice.id !== id));
+  }, []);
+
+  const renderSample = useCallback(
+    async (name: string, content: string, service: string) => {
+      const id = Date.now();
+      const put = (notice: Omit<Notice, 'id'>) =>
+        setNotices((current) => [...current.filter((entry) => entry.id !== id), { id, ...notice }]);
+      put({ text: `Renderizando la muestra de ${name}. Puede tardar un minuto.`, busy: true });
+      try {
+        const { url } = await api<{ url: string }>('/templates/sample', 'POST', { content, service });
+        put({ text: `La muestra de ${name} está lista.`, video: url });
+      } catch (failure) {
+        put({ text: (failure as Error).message, error: true });
+      }
+    },
+    [],
+  );
 
   const refresh = useCallback(async () => {
     try {
@@ -199,7 +221,13 @@ export function App() {
         {view === 'revision' && <Review items={items} onOpen={open} />}
         {view === 'analitica' && <Analytics connected={status.instagram} />}
         {view === 'bases' && <Files kind="bases" title="Documentos" extension=".md" />}
-        {view === 'templates' && <Templates services={status.taxonomy.services} />}
+        {view === 'templates' && (
+          <Templates
+            services={status.taxonomy.services}
+            sampling={notices.some((notice) => notice.busy)}
+            onSample={renderSample}
+          />
+        )}
         {view === 'skills' && <Files kind="skills" title="Skills" extension="" />}
         {view === 'agents' && <Files kind="agents" title="Agentes" extension=".md" />}
         {view === 'actividad' && (
@@ -209,6 +237,21 @@ export function App() {
         {view === 'conexiones' && <Connections notice={notice} onChanged={boot} />}
         {view === 'servidor' && <Server />}
       </main>
+      <Toasts notices={notices} onDismiss={dismiss} onOpen={(notice) => setWatching(notice.video ?? null)} />
+      {watching && (
+        <Modal onClose={() => setWatching(null)}>
+          <header className="sheet-head">
+            <b>Video de muestra</b>
+            <div className="spacer" />
+            <button type="button" className="round" aria-label="Cerrar" onClick={() => setWatching(null)}>
+              <Icon name="close" size={14} />
+            </button>
+          </header>
+          <div className="sheet-video">
+            <video src={watching} controls autoPlay playsInline />
+          </div>
+        </Modal>
+      )}
       {(selected !== null || draft !== null) && (
         <ItemModal
           key={selected ?? 'nuevo'}

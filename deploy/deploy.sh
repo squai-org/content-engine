@@ -40,6 +40,17 @@ ensure_ffmpeg() {
   rm -rf "$tmp"
 }
 
+ensure_build_tools() {
+  if command -v cmake >/dev/null && command -v c++ >/dev/null && command -v make >/dev/null; then
+    return 0
+  fi
+  if command -v apt-get >/dev/null; then
+    DEBIAN_FRONTEND=noninteractive apt-get install -y cmake g++ make
+  elif command -v dnf >/dev/null; then
+    dnf install -y cmake gcc-c++ make
+  fi || echo "No pude instalar cmake y el compilador. La transcripción de videos no funcionará." >&2
+}
+
 as_app() {
   runuser -u "$APP_USER" -- env HOME="$APP_HOME" "$@"
 }
@@ -70,6 +81,7 @@ activate() {
 }
 
 ensure_ffmpeg
+ensure_build_tools
 
 previous="$(as_app git -C "$APP_DIR" rev-parse HEAD)"
 as_app git -C "$APP_DIR" fetch --prune origin
