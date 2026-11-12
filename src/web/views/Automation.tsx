@@ -1,75 +1,93 @@
-import { useCallback, useEffect, useState } from 'react';
-import { type AppStatus, api, type Hook, type Job, STATUS_LABEL, type Taxonomy } from '../api.ts';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import {
+  ACTION_LABEL,
+  type AppStatus,
+  api,
+  type Hook,
+  type Planning,
+  STATUS_LABEL,
+  type Taxonomy,
+  WEEKDAYS,
+} from '../api.ts';
+import { Icon, TokenInput } from '../ui.tsx';
 
-type Props = { status: AppStatus; onTaxonomy: () => void };
+type Props = { status: AppStatus; onSaved: () => void };
 
-const WEEKDAYS = ['Domingo', 'Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes', 'Sábado'];
-const JOB_LABEL: Record<Job['status'], string> = {
-  queued: 'En cola',
-  running: 'En curso',
-  done: 'Hecho',
-  failed: 'Falló',
-};
-const ACTION_LABEL: Record<string, string> = {
-  plan: 'Planear semana',
-  produce: 'Producir propuesta',
-  revise: 'Aplicar ajustes',
-};
-const TAXONOMY_LABEL: Record<keyof Taxonomy, string> = {
-  pillars: 'Pilares',
-  services: 'Servicios',
-  funnel: 'Etapas',
-  ctas: 'Llamadas a la acción',
-};
+const TAXONOMY: { key: keyof Taxonomy; label: string; hint: string; tone: string }[] = [
+  { key: 'pillars', label: 'Pilares', hint: 'Temas de los que habla la marca', tone: 'purple' },
+  { key: 'services', label: 'Servicios', hint: 'Lo que se ofrece', tone: 'teal' },
+  { key: 'funnel', label: 'Etapas', hint: 'Momentos del embudo', tone: 'orange' },
+  { key: 'ctas', label: 'Llamadas a la acción', hint: 'Qué se le pide al lector', tone: 'pink' },
+];
 
-export function Automation({ status, onTaxonomy }: Props) {
+export function Automation({ status, onSaved }: Props) {
   const [hooks, setHooks] = useState<Hook[]>([]);
-  const [jobs, setJobs] = useState<Job[]>([]);
   const [agents, setAgents] = useState<string[]>([]);
-  const [taxonomy, setTaxonomy] = useState(() =>
-    Object.fromEntries(
-      Object.entries(status.taxonomy).map(([key, values]) => [key, values.join('\n')]),
-    ),
-  );
+  const [taxonomy, setTaxonomy] = useState(status.taxonomy);
+  const [planning, setPlanning] = useState(status.planning);
+  const [slot, setSlot] = useState({ weekday: 1, time: '12:00' });
+  const [saved, setSaved] = useState('');
+  const [error, setError] = useState('');
+  const flash = useRef<ReturnType<typeof setTimeout>>(undefined);
 
   const load = useCallback(async () => {
-    const [hookList, jobList, agentList] = await Promise.all([
+    const [hookList, agentList] = await Promise.all([
       api<Hook[]>('/hooks'),
-      api<Job[]>('/jobs'),
       api<string[]>('/files/agents'),
     ]);
     setHooks(hookList);
-    setJobs(jobList);
     setAgents(agentList.map((name) => name.replace(/\.md$/, '')));
   }, []);
 
   useEffect(() => {
     load();
-    const timer = setInterval(load, 5000);
-    return () => clearInterval(timer);
   }, [load]);
 
-  async function patch(id: string, body: Partial<Hook>) {
-    await api(`/hooks/${id}`, 'PATCH', body);
-    load();
+  async function persist(action: () => Promise<unknown>, label: string) {
+    setError('');
+    try {
+      await action();
+      setSaved(label);
+      clearTimeout(flash.current);
+      flash.current = setTimeout(() => setSaved(''), 1800);
+      onSaved();
+    } catch (failure) {
+      setError((failure as Error).message);
+    }
   }
 
-  async function saveTaxonomy() {
-    const body = Object.fromEntries(
-      Object.entries(taxonomy).map(([key, text]) => [key, text.split('\n')]),
+  const patch = (id: string, body: Partial<Hook>) =>
+    persist(() => api(`/hooks/${id}`, 'PATCH', body).then(load), 'Guardado');
+
+  function saveTaxonomy(next: Taxonomy) {
+    setTaxonomy(next);
+    persist(() => api('/taxonomy', 'PUT', next), 'Taxonomía guardada');
+  }
+
+  function savePlanning(next: Planning) {
+    setPlanning(next);
+    persist(
+      () => api<Planning>('/planning', 'PUT', next).then(setPlanning),
+      'Planificación guardada',
     );
-    await api('/taxonomy', 'PUT', body);
-    onTaxonomy();
   }
 
   return (
     <section className="view">
       <header className="toolbar">
         <h1 className="title">Automatización</h1>
+        <div className="spacer" />
+        {error && <span className="error-text">{error}</span>}
+        {saved && (
+          <span className="saved">
+            <Icon name="check" size={14} />
+            {saved}
+          </span>
+        )}
       </header>
       <div className="scroll">
         <div className="list-section">
-          <h2>Hooks</h2>
+          <h2>Agentes automáticos</h2>
           <div className="list">
             {hooks.map((hook) => (
               <div key={hook.id} className="list-row static">
@@ -101,14 +119,18 @@ export function Automation({ status, onTaxonomy }: Props) {
                     />
                     <button
                       type="button"
-                      onClick={() => api(`/hooks/${hook.id}/fire`, 'POST').then(load)}
+                      onClick={() =>
+                        persist(() => api(`/hooks/${hook.id}/fire`, 'POST'), 'En cola. Míralo en Actividad')
+                      }
                     >
+                      <Icon name="play" size={12} />
                       Ejecutar ahora
                     </button>
                   </>
                 )}
                 <select
                   value={hook.agent}
+                  aria-label="Agente"
                   onChange={(event) => patch(hook.id, { agent: event.target.value })}
                 >
                   {agents.map((agent) => (
@@ -132,42 +154,112 @@ export function Automation({ status, onTaxonomy }: Props) {
         </div>
 
         <div className="list-section">
-          <h2>Ejecuciones</h2>
+          <h2>Planificación</h2>
           <div className="list">
-            {jobs.map((job) => (
-              <div key={job.id} className="list-row static">
-                <span className="list-main">
-                  <b>{ACTION_LABEL[job.action]}</b>
-                  <span className="muted">
-                    {job.agent} · {new Date(job.created_at).toLocaleString('es')} · intento{' '}
-                    {job.attempts}
-                    {job.error ? ` · ${job.error}` : ''}
-                  </span>
-                </span>
-                <span className={`pill j-${job.status}`}>{JOB_LABEL[job.status]}</span>
+            <div className="list-row static">
+              <span className="list-main">
+                <b>Piezas por semana</b>
+                <span className="muted">Cuántas ideas propone el planner si la estrategia no dice otra cosa</span>
+              </span>
+              <div className="stepper">
+                <button
+                  type="button"
+                  aria-label="Menos"
+                  disabled={planning.pieces <= 1}
+                  onClick={() => savePlanning({ ...planning, pieces: planning.pieces - 1 })}
+                >
+                  −
+                </button>
+                <b>{planning.pieces}</b>
+                <button
+                  type="button"
+                  aria-label="Más"
+                  onClick={() => savePlanning({ ...planning, pieces: planning.pieces + 1 })}
+                >
+                  +
+                </button>
               </div>
-            ))}
-            {!jobs.length && <p className="empty">Sin ejecuciones.</p>}
+            </div>
+            <div className="list-row static tall">
+              <span className="list-main">
+                <b>Horarios de publicación</b>
+                <span className="muted">
+                  El planner los prefiere y «Siguiente libre» los usa al programar una pieza
+                </span>
+                <span className="slots">
+                  {planning.slots.map((entry) => (
+                    <span key={`${entry.weekday}-${entry.time}`} className="token">
+                      {WEEKDAYS[entry.weekday]} {entry.time}
+                      <button
+                        type="button"
+                        aria-label="Quitar horario"
+                        onClick={() =>
+                          savePlanning({
+                            ...planning,
+                            slots: planning.slots.filter((other) => other !== entry),
+                          })
+                        }
+                      >
+                        <Icon name="close" size={12} />
+                      </button>
+                    </span>
+                  ))}
+                  {!planning.slots.length && <span className="muted">Sin horarios.</span>}
+                </span>
+              </span>
+              <select
+                value={slot.weekday}
+                aria-label="Día"
+                onChange={(event) => setSlot({ ...slot, weekday: Number(event.target.value) })}
+              >
+                {WEEKDAYS.map((name, index) => (
+                  <option key={name} value={index}>
+                    {name}
+                  </option>
+                ))}
+              </select>
+              <input
+                type="time"
+                value={slot.time}
+                aria-label="Hora"
+                onChange={(event) => setSlot({ ...slot, time: event.target.value })}
+              />
+              <button
+                type="button"
+                onClick={() => {
+                  const exists = planning.slots.some(
+                    (entry) => entry.weekday === slot.weekday && entry.time === slot.time,
+                  );
+                  if (!exists) savePlanning({ ...planning, slots: [...planning.slots, slot] });
+                }}
+              >
+                <Icon name="plus" size={14} />
+                Agregar
+              </button>
+            </div>
           </div>
         </div>
 
         <div className="list-section">
           <h2>Taxonomía</h2>
           <div className="taxonomy">
-            {(Object.keys(TAXONOMY_LABEL) as (keyof Taxonomy)[]).map((key) => (
-              <label key={key} className="field">
-                <span>{TAXONOMY_LABEL[key]}</span>
-                <textarea
-                  rows={5}
-                  value={taxonomy[key]}
-                  onChange={(event) => setTaxonomy({ ...taxonomy, [key]: event.target.value })}
+            {TAXONOMY.map((group) => (
+              <div key={group.key} className="taxonomy-card">
+                <div className="taxonomy-head">
+                  <b>{group.label}</b>
+                  <span className="count">{taxonomy[group.key].length}</span>
+                </div>
+                <span className="muted">{group.hint}</span>
+                <TokenInput
+                  values={taxonomy[group.key]}
+                  tone={group.tone}
+                  placeholder="Agregar y pulsar Enter"
+                  onChange={(values) => saveTaxonomy({ ...taxonomy, [group.key]: values })}
                 />
-              </label>
+              </div>
             ))}
           </div>
-          <button type="button" onClick={saveTaxonomy}>
-            Guardar taxonomía
-          </button>
+          <p className="muted note">Se guarda sola. Los agentes y el formulario de piezas usan estas listas.</p>
         </div>
       </div>
     </section>

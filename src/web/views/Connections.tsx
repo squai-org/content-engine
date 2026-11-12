@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { api, type InstagramConnection } from '../api.ts';
+import { Icon } from '../ui.tsx';
 
 type Props = { notice: string; onChanged: () => void };
 
@@ -48,6 +49,9 @@ export function Connections({ notice, onChanged }: Props) {
           <h2>Redes</h2>
           <div className="list">
             <div className="list-row static">
+              <span className="nav-icon big" style={{ '--tone': 'var(--pink)' } as React.CSSProperties}>
+                <Icon name="image" size={18} />
+              </span>
               <span className="list-main">
                 <b>Instagram</b>
                 <span className="muted">
@@ -81,6 +85,28 @@ export function Connections({ notice, onChanged }: Props) {
           <div className="list-section">
             <h2>URL de redirección para la app de Meta</h2>
             <pre className="script">{info.redirectUri}</pre>
+          </div>
+        )}
+        {info && (
+          <div className="list-section">
+            <h2>Permisos que usa cada función</h2>
+            <div className="list">
+              {[
+                ['Publicar piezas', 'instagram_basic, instagram_content_publish'],
+                ['Analítica', 'instagram_manage_insights'],
+                ['Primer comentario', 'instagram_manage_comments'],
+              ].map(([feature, permissions]) => (
+                <div key={feature} className="list-row static">
+                  <span className="list-main">
+                    <b>{feature}</b>
+                    <span className="muted">{permissions}</span>
+                  </span>
+                </div>
+              ))}
+            </div>
+            <p className="muted note">
+              Se agregan en la configuración de inicio de sesión de la app de Meta. Después hay que reconectar.
+            </p>
           </div>
         )}
       </div>

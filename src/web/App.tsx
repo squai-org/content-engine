@@ -1,37 +1,58 @@
 import { type FormEvent, useCallback, useEffect, useState } from 'react';
 import { type AppStatus, api, type Item, Unauthorized } from './api.ts';
+import { Icon } from './ui.tsx';
+import { Activity } from './views/Activity.tsx';
+import { Analytics } from './views/Analytics.tsx';
 import { Automation } from './views/Automation.tsx';
-import { Connections } from './views/Connections.tsx';
 import { Calendar } from './views/Calendar.tsx';
+import { Connections } from './views/Connections.tsx';
 import { Files } from './views/Files.tsx';
-import { Inspector } from './views/Inspector.tsx';
+import { ItemModal } from './views/ItemModal.tsx';
 import { Review } from './views/Review.tsx';
+import { Server } from './views/Server.tsx';
+import { Templates } from './views/Templates.tsx';
 
-type View = 'calendario' | 'revision' | 'bases' | 'templates' | 'skills' | 'agents' | 'conexiones' | 'automatizacion';
+type View =
+  | 'calendario'
+  | 'revision'
+  | 'analitica'
+  | 'bases'
+  | 'templates'
+  | 'skills'
+  | 'agents'
+  | 'actividad'
+  | 'automatizacion'
+  | 'conexiones'
+  | 'servidor';
 export type Draft = { scheduled_at: string | null };
 
-const NAV: { group: string; entries: { id: View; label: string }[] }[] = [
+type Entry = { id: View; label: string; icon: string; tone: string };
+
+const NAV: { group: string; entries: Entry[] }[] = [
   {
     group: 'Contenido',
     entries: [
-      { id: 'calendario', label: 'Calendario' },
-      { id: 'revision', label: 'Revisión' },
+      { id: 'calendario', label: 'Calendario', icon: 'calendar', tone: 'red' },
+      { id: 'revision', label: 'Revisión', icon: 'check', tone: 'blue' },
+      { id: 'analitica', label: 'Analítica', icon: 'chart', tone: 'pink' },
     ],
   },
   {
-    group: 'Bases',
+    group: 'Biblioteca',
     entries: [
-      { id: 'bases', label: 'Documentos' },
-      { id: 'templates', label: 'Templates' },
+      { id: 'bases', label: 'Documentos', icon: 'doc', tone: 'orange' },
+      { id: 'templates', label: 'Templates', icon: 'layout', tone: 'purple' },
+      { id: 'skills', label: 'Skills', icon: 'sparkle', tone: 'yellow' },
+      { id: 'agents', label: 'Agentes', icon: 'agent', tone: 'teal' },
     ],
   },
   {
     group: 'Sistema',
     entries: [
-      { id: 'skills', label: 'Skills' },
-      { id: 'agents', label: 'Agentes' },
-      { id: 'conexiones', label: 'Conexiones' },
-      { id: 'automatizacion', label: 'Automatización' },
+      { id: 'actividad', label: 'Actividad', icon: 'activity', tone: 'green' },
+      { id: 'automatizacion', label: 'Automatización', icon: 'bolt', tone: 'indigo' },
+      { id: 'conexiones', label: 'Conexiones', icon: 'link', tone: 'blue' },
+      { id: 'servidor', label: 'Servidor', icon: 'server', tone: 'gray' },
     ],
   },
 ];
@@ -49,7 +70,10 @@ function Login({ onDone }: { onDone: () => void }) {
     }
   }
   return (
-    <form className="login" onSubmit={submit}>
+    <form className="login glass" onSubmit={submit}>
+      <span className="app-mark">
+        <Icon name="sparkle" size={26} />
+      </span>
       <h1>Contenido</h1>
       <input
         type="password"
@@ -75,6 +99,7 @@ export function App() {
   const [items, setItems] = useState<Item[]>([]);
   const [selected, setSelected] = useState<string | null>(null);
   const [draft, setDraft] = useState<Draft | null>(null);
+  const [job, setJob] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
     try {
@@ -106,6 +131,11 @@ export function App() {
     return () => clearInterval(timer);
   }, [locked, status, refresh]);
 
+  const close = useCallback(() => {
+    setSelected(null);
+    setDraft(null);
+  }, []);
+
   if (locked) return <Login onDone={boot} />;
   if (!status) return null;
 
@@ -114,16 +144,21 @@ export function App() {
     setDraft(null);
     setSelected(id);
   };
-  const close = () => {
-    setSelected(null);
-    setDraft(null);
+  const showJob = (id: string) => {
+    close();
+    setJob(id);
+    setView('actividad');
   };
-  const inspecting = selected !== null || draft !== null;
 
   return (
-    <div className={`shell${inspecting ? ' with-inspector' : ''}`}>
-      <nav className="sidebar">
-        <div className="brand">Contenido</div>
+    <div className="shell">
+      <nav className="sidebar glass">
+        <div className="brand">
+          <span className="app-mark small">
+            <Icon name="sparkle" size={15} />
+          </span>
+          Contenido
+        </div>
         {NAV.map((section) => (
           <div key={section.group} className="nav-group">
             <div className="nav-title">{section.group}</div>
@@ -134,22 +169,25 @@ export function App() {
                 className={`nav-item${view === entry.id ? ' active' : ''}`}
                 onClick={() => setView(entry.id)}
               >
-                <span>{entry.label}</span>
+                <span className="nav-icon" style={{ '--tone': `var(--${entry.tone})` } as React.CSSProperties}>
+                  <Icon name={entry.icon} size={14} />
+                </span>
+                <span className="nav-label">{entry.label}</span>
                 {entry.id === 'revision' && pending > 0 && <span className="badge">{pending}</span>}
               </button>
             ))}
           </div>
         ))}
-        <div className="sidebar-foot">
+        <button type="button" className="sidebar-foot" onClick={() => setView('conexiones')}>
           <span className={`dot ${status.instagram ? 'ok' : 'off'}`} />
           {status.instagram ? 'Instagram conectado' : 'Instagram sin conectar'}
-        </div>
+        </button>
       </nav>
-      <main className="content">
+      <main className="content glass">
+        {status.paused && <p className="banner error flush">{status.paused}</p>}
         {view === 'calendario' && (
           <Calendar
             items={items}
-            selected={selected}
             onOpen={open}
             onCreate={(scheduled_at) => {
               setSelected(null);
@@ -158,22 +196,28 @@ export function App() {
             onChanged={refresh}
           />
         )}
-        {view === 'revision' && <Review items={items} selected={selected} onOpen={open} />}
+        {view === 'revision' && <Review items={items} onOpen={open} />}
+        {view === 'analitica' && <Analytics connected={status.instagram} />}
         {view === 'bases' && <Files kind="bases" title="Documentos" extension=".md" />}
-        {view === 'templates' && <Files kind="templates" title="Templates" extension=".html" />}
+        {view === 'templates' && <Templates services={status.taxonomy.services} />}
         {view === 'skills' && <Files kind="skills" title="Skills" extension="" />}
         {view === 'agents' && <Files kind="agents" title="Agentes" extension=".md" />}
+        {view === 'actividad' && (
+          <Activity selected={job} onSelect={setJob} onOpenItem={open} onChanged={refresh} />
+        )}
+        {view === 'automatizacion' && <Automation status={status} onSaved={boot} />}
         {view === 'conexiones' && <Connections notice={notice} onChanged={boot} />}
-        {view === 'automatizacion' && <Automation status={status} onTaxonomy={boot} />}
+        {view === 'servidor' && <Server />}
       </main>
-      {inspecting && (
-        <Inspector
+      {(selected !== null || draft !== null) && (
+        <ItemModal
           key={selected ?? 'nuevo'}
           itemId={selected}
           draft={draft}
           taxonomy={status.taxonomy}
           onClose={close}
           onChanged={refresh}
+          onShowJob={showJob}
           onCreated={(id) => {
             setDraft(null);
             setSelected(id);

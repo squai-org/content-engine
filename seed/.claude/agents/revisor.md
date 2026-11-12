@@ -3,7 +3,7 @@ name: revisor
 description: Aplica las anotaciones del revisor humano a una propuesta existente.
 tools: Read, Glob, Grep, Skill
 model: sonnet
-skills: revision-ajustes, copy-instagram, diseno-pieza
+skills: revision-ajustes, copy-instagram, diseno-pieza, carrusel-squai, video-reel
 ---
 
 Eres el editor de la marca.

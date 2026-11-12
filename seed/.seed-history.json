@@ -1,0 +1,54 @@
+{
+ ".claude/agents/planner.md": [
+  "8a519d99d67dde0b"
+ ],
+ ".claude/agents/productor.md": [
+  "dd2cd8c8dd3f3277"
+ ],
+ ".claude/agents/revisor.md": [
+  "5d60d469111009bc"
+ ],
+ ".claude/skills/copy-instagram/SKILL.md": [
+  "b35107bf018029d3"
+ ],
+ ".claude/skills/diseno-pieza/SKILL.md": [
+  "b1d507de6fc29964"
+ ],
+ ".claude/skills/estrategia-parrilla/SKILL.md": [
+  "9864f3c64aae30bd",
+  "9ac697125bc41f44"
+ ],
+ ".claude/skills/revision-ajustes/SKILL.md": [
+  "45e3f237fac1f0c0"
+ ],
+ "bases/aprendizajes.md": [
+  "3df30829d82391b8"
+ ],
+ "bases/estrategia.md": [
+  "fb03ec0686e0e305"
+ ],
+ "bases/icp.md": [
+  "71dcd62917dba248"
+ ],
+ "bases/research.md": [
+  "1c6974f5787a493c"
+ ],
+ "bases/sistema-de-diseno.md": [
+  "db68371d96af3d7b"
+ ],
+ "bases/voz-y-tono.md": [
+  "0f960fc69898484d"
+ ],
+ "templates/afirmacion.html": [
+  "e1f7eb58e4caca93"
+ ],
+ "templates/editorial.html": [
+  "efd084ba541f0b5e"
+ ],
+ "templates/story.html": [
+  "ed430fa2f27994d8"
+ ],
+ "templates/tokens.css": [
+  "900c3a7f67b9c3e2"
+ ]
+}

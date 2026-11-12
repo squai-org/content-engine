@@ -1,6 +1,7 @@
 import { FORMAT_LABEL, type Item, STATUS_LABEL, type Status } from '../api.ts';
+import { Thumb } from '../ui.tsx';
 
-type Props = { items: Item[]; selected: string | null; onOpen: (id: string) => void };
+type Props = { items: Item[]; onOpen: (id: string) => void };
 
 const SECTIONS: { title: string; statuses: Status[] }[] = [
   { title: 'Esperan tu revisión', statuses: ['revision'] },
@@ -20,7 +21,7 @@ function when(iso: string | null): string {
   });
 }
 
-export function Review({ items, selected, onOpen }: Props) {
+export function Review({ items, onOpen }: Props) {
   return (
     <section className="view">
       <header className="toolbar">
@@ -32,28 +33,21 @@ export function Review({ items, selected, onOpen }: Props) {
           if (!rows.length) return null;
           return (
             <div key={section.title} className="list-section">
-              <h2>{section.title}</h2>
-              <div className="list">
+              <h2>
+                {section.title} <span className="count">{rows.length}</span>
+              </h2>
+              <div className="cards">
                 {rows.map((item) => (
-                  <button
-                    key={item.id}
-                    type="button"
-                    className={`list-row${item.id === selected ? ' active' : ''}`}
-                    onClick={() => onOpen(item.id)}
-                  >
-                    {item.assets[0] && !/\.(mp4|mov)$/.test(item.assets[0]) ? (
-                      <img src={`/media/${item.assets[0]}`} alt="" />
-                    ) : (
-                      <span className="thumb" />
-                    )}
-                    <span className="list-main">
+                  <button key={item.id} type="button" className="card" onClick={() => onOpen(item.id)}>
+                    <Thumb item={item} className="card-media" />
+                    <span className="card-body">
+                      <span className={`pill s-${item.status}`}>{STATUS_LABEL[item.status]}</span>
                       <b>{item.title}</b>
                       <span className="muted">
-                        {FORMAT_LABEL[item.format]} · {item.pillar || 'Sin pilar'} ·{' '}
-                        {when(item.scheduled_at)}
+                        {FORMAT_LABEL[item.format]} · {item.pillar || 'Sin pilar'}
                       </span>
+                      <span className="muted">{when(item.scheduled_at)}</span>
                     </span>
-                    <span className={`pill s-${item.status}`}>{STATUS_LABEL[item.status]}</span>
                   </button>
                 ))}
               </div>

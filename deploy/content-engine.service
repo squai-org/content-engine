@@ -12,6 +12,10 @@ Environment=PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright
 ExecStart=/usr/bin/node src/server/index.ts
 Restart=on-failure
 RestartSec=5
+CPUQuota=350%
+MemoryHigh=16G
+MemoryMax=20G
+TasksMax=2048
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true

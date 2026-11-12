@@ -1,14 +1,25 @@
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { extname, join, normalize, resolve } from 'node:path';
 import { type Context as Request, Hono } from 'hono';
 import { deleteCookie, getSignedCookie, setSignedCookie } from 'hono/cookie';
 import type { Context } from './agents.ts';
 import type { ItemPatch } from './db.ts';
 import { appConfigured, authorizeUrl, callbackUrl, CONNECTION_KEY, completeConnection } from './connections.ts';
-import { ACTIONS, type Action, canHumanMove, isFormat, isStatus } from './domain.ts';
-import { dispatchStatusHooks, fireHook, instagramReady, savedConnection } from './pipeline.ts';
-import { isKind } from './workspace.ts';
+import { ACTIONS, type Action, canHumanMove, isFormat, isStatus, sceneSeconds, type Slide } from './domain.ts';
+import { fetchInsights, type Insights } from './insights.ts';
+import {
+  cancelJob,
+  dispatchStatusHooks,
+  fireHook,
+  instagramAccount,
+  instagramReady,
+  nextSlot,
+  requestRun,
+  savedConnection,
+} from './pipeline.ts';
+import { buildCompositionHtml, buildSlideHtml, compositionData, gsapPath, localGsap } from './render.ts';
+import { isKind, templateMeta } from './workspace.ts';
 
 const COOKIE = 'ce_session';
 const STATE_COOKIE = 'ce_oauth';
@@ -28,7 +39,68 @@ const TYPES: Record<string, string> = {
   '.json': 'application/json',
   '.ico': 'image/x-icon',
 };
-const TEXT_FIELDS = ['title', 'message', 'pillar', 'service', 'funnel', 'cta', 'copy', 'notes'] as const;
+const TEXT_FIELDS = [
+  'title',
+  'message',
+  'pillar',
+  'service',
+  'funnel',
+  'cta',
+  'copy',
+  'notes',
+  'first_comment',
+] as const;
+const INSIGHTS_KEY = 'insights';
+const INSIGHTS_TTL_MS = 15 * 60 * 1000;
+const TIME = /^([01]\d|2[0-3]):[0-5]\d$/;
+const MAX_PIECES = 21;
+const SAMPLES = '_muestras';
+const KEEP_SAMPLES = 6;
+
+const SAMPLE_SLIDES: Slide[] = [
+  {
+    kicker: 'Guía',
+    title: 'Un título con la [[frase clave]] resaltada',
+    body: 'Línea de apoyo que explica la idea.',
+    note: '(anotación breve y humana)',
+    source: 'Fuente del dato, 2026',
+  },
+  {
+    kicker: 'Paso 1',
+    title: 'Primera idea, [[una sola]] por lámina',
+    body: 'El apoyo desarrolla el título en dos o tres líneas, sin repetirlo.',
+    note: 'Una nota al margen.',
+    source: 'Fuente del dato, 2026',
+  },
+  {
+    kicker: 'Paso 2',
+    title: 'Segunda idea con [[énfasis]]',
+    body: 'Texto de apoyo de ejemplo para medir cuánto cabe en la lámina.',
+    note: 'Otra nota corta.',
+    source: '',
+  },
+  {
+    kicker: 'Paso 3',
+    title: 'Tercera idea, [[directa]]',
+    body: 'El contenido real lo escribe el agente al producir la pieza.',
+    note: '',
+    source: 'Fuente del dato, 2026',
+  },
+  {
+    kicker: 'Paso 4',
+    title: 'Cuarta idea para [[cerrar]] el argumento',
+    body: 'Apoyo breve.',
+    note: 'Última nota.',
+    source: '',
+  },
+  {
+    kicker: 'Cierre',
+    title: 'El cierre con la [[llamada a la acción]]',
+    body: 'Una línea que dice qué hacer ahora.',
+    note: '',
+    source: 'Fuentes del carrusel',
+  },
+];
 
 function digest(value: string): Buffer {
   return createHash('sha256').update(value).digest();
@@ -38,8 +110,22 @@ function sendFile(c: Request, root: string, relative: string): Response | null {
   const base = resolve(root);
   const path = resolve(base, normalize(relative).replace(/^([/\\])+/, ''));
   if (!path.startsWith(base) || !existsSync(path) || !statSync(path).isFile()) return null;
-  return c.body(readFileSync(path), 200, {
-    'Content-Type': TYPES[extname(path).toLowerCase()] ?? 'application/octet-stream',
+  const type = TYPES[extname(path).toLowerCase()] ?? 'application/octet-stream';
+  const content = readFileSync(path);
+  const range = /^bytes=(\d*)-(\d*)$/.exec(c.req.header('range') ?? '');
+  if (!range || (!range[1] && !range[2])) {
+    return c.body(content, 200, { 'Content-Type': type, 'Accept-Ranges': 'bytes' });
+  }
+  const size = content.length;
+  const start = range[1] ? Number(range[1]) : Math.max(0, size - Number(range[2]));
+  const end = range[1] && range[2] ? Math.min(Number(range[2]), size - 1) : size - 1;
+  if (start > end || start >= size) {
+    return c.body(null, 416, { 'Content-Range': `bytes */${size}` });
+  }
+  return c.body(content.subarray(start, end + 1), 206, {
+    'Content-Type': type,
+    'Accept-Ranges': 'bytes',
+    'Content-Range': `bytes ${start}-${end}/${size}`,
   });
 }
 
@@ -84,8 +170,137 @@ export function createApp(ctx: Context, fetchImpl: typeof fetch = fetch): Hono {
       instagram: instagramReady(ctx),
       timezone: config.timezone,
       taxonomy: store.getTaxonomy(),
+      planning: store.getPlanning(),
+      paused: ctx.monitor.pausedReason(),
     }),
   );
+
+  app.put('/api/planning', async (c) => {
+    const body = (await c.req.json()) as { pieces?: unknown; slots?: unknown };
+    const pieces = Math.min(MAX_PIECES, Math.max(1, Math.round(Number(body.pieces) || 1)));
+    const slots = (Array.isArray(body.slots) ? body.slots : [])
+      .map((slot: { weekday?: unknown; time?: unknown }) => ({
+        weekday: Number(slot.weekday),
+        time: String(slot.time ?? ''),
+      }))
+      .filter((slot) => slot.weekday >= 0 && slot.weekday <= 6 && TIME.test(slot.time))
+      .sort((a, b) => a.weekday - b.weekday || a.time.localeCompare(b.time));
+    store.setSetting('planning', { pieces, slots });
+    return c.json(store.getPlanning());
+  });
+
+  app.get('/api/slots/next', (c) => {
+    const taken = store
+      .listItems()
+      .filter((item) => item.scheduled_at && item.id !== c.req.query('except'))
+      .map((item) => item.scheduled_at as string);
+    return c.json({ at: nextSlot(store.getPlanning().slots, taken, new Date(), config.timezone) });
+  });
+
+  app.get('/api/server', (c) => c.json(ctx.monitor.snapshot()));
+
+  app.get('/api/insights', async (c) => {
+    if (!instagramReady(ctx)) return c.json({ error: 'Conecta Instagram para ver la analítica.' }, 409);
+    const cached = store.getSetting<Insights | null>(INSIGHTS_KEY, null);
+    const fresh = cached && Date.now() - cached.fetchedAt < INSIGHTS_TTL_MS;
+    if (cached && fresh && c.req.query('refresh') !== '1') return c.json(cached);
+    const insights = await fetchInsights(instagramAccount(ctx), fetchImpl);
+    store.setSetting(INSIGHTS_KEY, insights);
+    return c.json(insights);
+  });
+
+  app.post('/api/templates/preview', async (c) => {
+    const body = (await c.req.json()) as { content?: string; service?: string };
+    const content = body.content ?? '';
+    const meta = templateMeta(content);
+    if (!meta) {
+      return c.json(
+        { error: 'Al template le faltan las etiquetas meta "size" y "formats".' },
+        400,
+      );
+    }
+    const multiple = meta.formats.includes('carrusel') || meta.formats.includes('reel');
+    const slides = multiple ? SAMPLE_SLIDES : SAMPLE_SLIDES.slice(0, 1);
+    const tokens = workspace.tokens();
+    const service = body.service ?? '';
+    if (meta.engine === 'remotion') return c.json({ ...meta, slides: [] });
+    if (meta.engine === 'hyperframes') {
+      const html = buildCompositionHtml(content, tokens, compositionData(service, slides, sceneSeconds));
+      return c.json({
+        ...meta,
+        slides: [
+          localGsap(html, `<script>${readFileSync(gsapPath(), 'utf8')}</script>`).replace(
+            /<head[^>]*>/i,
+            (head) => `${head}<script>window.__preview=true</script>`,
+          ),
+        ],
+      });
+    }
+    return c.json({
+      ...meta,
+      slides: slides.map((slide, index) =>
+        buildSlideHtml(content, tokens, slide, index, slides.length, {
+          service,
+          seconds: String(sceneSeconds(slide)),
+        }),
+      ),
+    });
+  });
+
+  let sampling = false;
+
+  app.post('/api/templates/sample', async (c) => {
+    const body = (await c.req.json()) as { content?: string; service?: string };
+    const content = body.content ?? '';
+    const service = body.service ?? '';
+    const meta = templateMeta(content);
+    if (!meta?.formats.includes('reel')) {
+      return c.json({ error: 'Solo los templates de reel generan un video de muestra.' }, 400);
+    }
+    const name = `${createHash('sha256').update(`${service}\n${content}`).digest('hex').slice(0, 16)}.mp4`;
+    const dir = join(config.dataDir, 'media', SAMPLES);
+    const path = join(dir, name);
+    const url = `/media/${SAMPLES}/${name}`;
+    if (existsSync(path)) return c.json({ url });
+    if (sampling) return c.json({ error: 'Ya hay una muestra renderizándose. Espera a que termine.' }, 409);
+    sampling = true;
+    try {
+      mkdirSync(dir, { recursive: true });
+      const scenes = SAMPLE_SLIDES.slice(0, 4);
+      const size = { width: meta.width, height: meta.height, path };
+      if (meta.engine === 'nativo') {
+        const tokens = workspace.tokens();
+        await ctx.video({
+          ...size,
+          scenes: scenes.map((slide, index) => {
+            const seconds = sceneSeconds(slide);
+            return {
+              html: buildSlideHtml(content, tokens, slide, index, scenes.length, {
+                service,
+                seconds: String(seconds),
+              }),
+              seconds,
+            };
+          }),
+        });
+      } else {
+        await ctx.compose({
+          ...size,
+          engine: meta.engine,
+          template: content,
+          data: compositionData(service, scenes, sceneSeconds),
+        });
+      }
+      const old = readdirSync(dir)
+        .map((file) => ({ file, at: statSync(join(dir, file)).mtimeMs }))
+        .sort((a, b) => b.at - a.at)
+        .slice(KEEP_SAMPLES);
+      for (const entry of old) rmSync(join(dir, entry.file), { force: true });
+      return c.json({ url });
+    } finally {
+      sampling = false;
+    }
+  });
 
   function connectionInfo() {
     const saved = savedConnection(ctx);
@@ -135,6 +350,7 @@ export function createApp(ctx: Context, fetchImpl: typeof fetch = fetch): Hono {
 
   app.delete('/api/connections/instagram', (c) => {
     store.setSetting(CONNECTION_KEY, null);
+    store.setSetting(INSIGHTS_KEY, null);
     return c.json({ ok: true });
   });
 
@@ -176,6 +392,7 @@ export function createApp(ctx: Context, fetchImpl: typeof fetch = fetch): Hono {
       cta: body.cta ?? '',
       scheduled_at: body.scheduled_at ?? null,
     });
+    if (body.first_comment) store.updateItem(item.id, { first_comment: body.first_comment });
     dispatchStatusHooks(ctx, item);
     return c.json(item, 201);
   });
@@ -183,7 +400,7 @@ export function createApp(ctx: Context, fetchImpl: typeof fetch = fetch): Hono {
   app.get('/api/items/:id', (c) => {
     const item = store.getItem(c.req.param('id'));
     if (!item) return c.json({ error: 'No existe.' }, 404);
-    return c.json({ ...item, events: store.listEvents(item.id) });
+    return c.json({ ...item, events: store.listEvents(item.id), job: store.latestJob(item.id) });
   });
 
   app.patch('/api/items/:id', async (c) => {
@@ -226,7 +443,12 @@ export function createApp(ctx: Context, fetchImpl: typeof fetch = fetch): Hono {
   });
 
   app.delete('/api/items/:id', (c) => {
-    store.deleteItem(c.req.param('id'));
+    const id = c.req.param('id');
+    if (!store.getItem(id)) return c.json({ ok: true });
+    const active = store.latestJob(id);
+    if (active) cancelJob(ctx, active.id);
+    store.deleteItem(id);
+    rmSync(join(config.dataDir, 'media', id), { recursive: true, force: true });
     return c.json({ ok: true });
   });
 
@@ -304,20 +526,37 @@ export function createApp(ctx: Context, fetchImpl: typeof fetch = fetch): Hono {
   });
 
   app.post('/api/items/:id/run', async (c) => {
-    const item = store.getItem(c.req.param('id'));
-    if (!item) return c.json({ error: 'No existe.' }, 404);
     const body = (await c.req.json()) as { action?: Action };
     const action = body.action;
     if (!action || !ACTIONS.includes(action) || action === 'plan') {
       return c.json({ error: 'Acción inválida.' }, 400);
     }
-    const hook = store.listHooks().find((entry) => entry.action === action);
-    if (!hook) return c.json({ error: 'Sin agente para la acción.' }, 400);
-    store.enqueue(action, hook.agent, item.id);
-    return c.json({ ok: true });
+    return c.json(requestRun(ctx, action, c.req.param('id')));
   });
 
   app.get('/api/jobs', (c) => c.json(store.listJobs()));
+
+  app.get('/api/jobs/:id', (c) => {
+    const job = store.getJob(c.req.param('id'));
+    if (!job) return c.json({ error: 'No existe.' }, 404);
+    const after = Number(c.req.query('after') ?? 0) || 0;
+    return c.json({ job, events: store.listJobEvents(job.id, after) });
+  });
+
+  app.post('/api/jobs/:id/cancel', (c) => {
+    const job = cancelJob(ctx, c.req.param('id'));
+    if (!job) return c.json({ error: 'No existe.' }, 404);
+    return c.json(job);
+  });
+
+  app.post('/api/jobs/:id/rerun', (c) => {
+    const job = store.getJob(c.req.param('id'));
+    if (!job) return c.json({ error: 'No existe.' }, 404);
+    if (job.status === 'queued' || job.status === 'running') {
+      return c.json({ error: 'La ejecución sigue en curso.' }, 409);
+    }
+    return c.json(requestRun(ctx, job.action, job.item_id));
+  });
 
   app.get('/media/*', (c) => {
     const response = sendFile(c, join(config.dataDir, 'media'), c.req.path.slice('/media/'.length));
