@@ -176,7 +176,7 @@ install -m 644 "$APP_DIR/deploy/content-engine-backup.timer" /etc/systemd/system
 install -m 644 "$APP_DIR/deploy/caddy.service" /etc/systemd/system/caddy.service
 sed "s/__DOMAIN__/$DOMAIN/" "$APP_DIR/deploy/Caddyfile" > /etc/caddy/Caddyfile
 chmod +x "$APP_DIR/deploy/deploy.sh" "$APP_DIR/deploy/backup.sh"
-ln -sf "$APP_DIR/deploy/deploy.sh" /usr/local/bin/content-engine-deploy
+ln -sf "$APP_DIR/deploy/deploy.sh" /usr/sbin/content-engine-deploy
 
 systemctl daemon-reload
 systemctl enable content-engine content-engine-backup.timer

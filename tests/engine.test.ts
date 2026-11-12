@@ -212,6 +212,7 @@ test('planner crea ideas y encola producción', async () => {
             },
             { title: 'Sin fecha', format: 'post', scheduled_at: 'mañana' },
           ],
+          research: '- Cierre de año: el lector planea 2027 (https://ejemplo.test/fuente).',
         }
       : { ...proposal, slides: [slide] },
   );
@@ -223,6 +224,9 @@ test('planner crea ideas y encola producción', async () => {
   assert.equal(items.length, 1);
   assert.equal(items[0].scheduled_at, '2026-11-17T17:00:00.000Z');
   assert.equal(ctx.store.listJobs().filter((job) => job.action === 'produce').length, 1);
+  const research = readFileSync(join(ctx.workspace.root, 'bases/research-semanal.md'), 'utf8');
+  assert.match(research, /^# Research semanal\n\nSemana del 2026-11-1\d al 2026-11-2\d\./);
+  assert.match(research, /Cierre de año/);
 });
 
 test('no publica piezas vencidas hace más de un día', async () => {
