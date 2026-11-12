@@ -10,6 +10,7 @@ import { createStore } from '../src/server/db.ts';
 import { canHumanMove, proposalViolations } from '../src/server/domain.ts';
 import {
   fireWeeklyHooks,
+  instagramAccount,
   instagramReady,
   localClock,
   publishDue,
@@ -301,61 +302,81 @@ test('publicador de instagram: error de la api', async () => {
   );
 });
 
-test('conexión de instagram por oauth', async () => {
+test('conexión de instagram con unified login', async () => {
   const calls: string[] = [];
-  const fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {
+  let assigned: unknown[] = [{ id: '178', username: 'heysquai' }];
+  const fetchImpl = (async (input: string | URL | Request) => {
     const url = String(input);
-    calls.push(`${init?.method ?? 'GET'} ${url.split('?')[0]} ${init?.body ? String(init.body) : ''}`);
-    if (url.includes('/oauth/access_token')) return Response.json({ access_token: 'corto', user_id: 5 });
-    if (url.includes('/access_token')) return Response.json({ access_token: 'largo', expires_in: 5184000 });
-    return Response.json({ user_id: '178', username: 'heysquai' });
+    calls.push(url);
+    if (url.includes('/oauth/access_token')) return Response.json({ access_token: 'sistema' });
+    if (url.includes('/debug_token')) return Response.json({ data: { expires_at: 0 } });
+    return Response.json({ data: assigned });
   }) as typeof fetch;
-  const { ctx } = setup(async () => proposal, { IG_APP_ID: 'app1', IG_APP_SECRET: 'sec1' });
+  const { ctx } = setup(async () => proposal, {
+    IG_APP_ID: 'app1',
+    IG_APP_SECRET: 'sec1',
+    IG_CONFIG_ID: 'cfg1',
+  });
   const app = createApp(ctx, fetchImpl);
   const session = await login(app);
   assert.equal(instagramReady(ctx), false);
 
-  const start = await app.request('/api/connections/instagram/start', {
-    method: 'POST',
-    headers: { cookie: session },
-  });
-  const { url } = (await start.json()) as { url: string };
-  const authorize = new URL(url);
-  assert.equal(authorize.origin + authorize.pathname, 'https://www.instagram.com/oauth/authorize');
+  async function start() {
+    const response = await app.request('/api/connections/instagram/start', {
+      method: 'POST',
+      headers: { cookie: session },
+    });
+    const { url } = (await response.json()) as { url: string };
+    const cookie = (response.headers.get('set-cookie') ?? '').split(';')[0];
+    return { authorize: new URL(url), headers: { cookie: `${session}; ${cookie}` } };
+  }
+
+  const { authorize, headers } = await start();
+  assert.equal(authorize.origin + authorize.pathname, 'https://www.facebook.com/v26.0/dialog/oauth');
   assert.equal(authorize.searchParams.get('client_id'), 'app1');
+  assert.equal(authorize.searchParams.get('config_id'), 'cfg1');
+  assert.equal(authorize.searchParams.get('response_type'), 'code');
+  assert.equal(authorize.searchParams.get('scope'), null);
   assert.equal(
     authorize.searchParams.get('redirect_uri'),
     'https://ce.test/api/connections/instagram/callback',
   );
-  assert.match(authorize.searchParams.get('scope') ?? '', /instagram_business_content_publish/);
   const state = authorize.searchParams.get('state') as string;
-  const stateCookie = (start.headers.get('set-cookie') ?? '').split(';')[0];
-  const headers = { cookie: `${session}; ${stateCookie}` };
 
   const forged = await app.request('/api/connections/instagram/callback?code=abc&state=otro', {
     headers,
   });
   assert.match(forged.headers.get('location') ?? '', /conexion=error/);
-  assert.equal(instagramReady(ctx), false);
+  assert.equal(calls.length, 0);
 
   const ok = await app.request(`/api/connections/instagram/callback?code=abc&state=${state}`, {
     headers,
   });
   assert.equal(ok.headers.get('location'), '/?conexion=ok');
   assert.equal(instagramReady(ctx), true);
-  const saved = savedConnection(ctx);
-  assert.equal(saved?.token, 'largo');
-  assert.equal(saved?.userId, '178');
-  assert.equal(saved?.username, 'heysquai');
-  assert.match(calls[0], /code=abc/);
+  assert.deepEqual(savedConnection(ctx), {
+    userId: '178',
+    username: 'heysquai',
+    token: 'sistema',
+    expiresAt: null,
+  });
+  assert.match(calls[0], /^https:\/\/graph\.facebook\.com\/v26\.0\/oauth\/access_token\?/);
   assert.match(calls[0], /client_secret=sec1/);
-
-  const info = (await (await app.request('/api/connections', { headers: { cookie: session } })).json()) as {
-    instagram: { connected: boolean; username: string };
-  };
-  assert.deepEqual([info.instagram.connected, info.instagram.username], [true, 'heysquai']);
+  assert.match(calls[0], /code=abc/);
+  assert.match(calls[1], /debug_token\?input_token=sistema&access_token=app1%7Csec1/);
+  assert.match(calls[2], /me\/assigned_instagram_accounts\?fields=id%2Cusername/);
+  assert.equal(instagramAccount(ctx).graphUrl, 'https://graph.facebook.com/v26.0');
 
   await app.request('/api/connections/instagram', { method: 'DELETE', headers: { cookie: session } });
+  assert.equal(instagramReady(ctx), false);
+
+  assigned = [];
+  const retry = await start();
+  const empty = await app.request(
+    `/api/connections/instagram/callback?code=abc&state=${retry.authorize.searchParams.get('state')}`,
+    { headers: retry.headers },
+  );
+  assert.match(decodeURIComponent(empty.headers.get('location') ?? ''), /business_management/);
   assert.equal(instagramReady(ctx), false);
 });
 

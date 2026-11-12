@@ -61,11 +61,15 @@ Para una versión concreta: `content-engine-deploy <sha>`. Si el servicio no res
 
 ## Conectar Instagram
 
-1. Crea una app en developers.facebook.com y agrega el producto API de Instagram con inicio de sesión de Instagram.
-2. En la configuración del producto, pega la URL de redirección que muestra la sección Conexiones.
-3. Agrega la cuenta como probador de la app y acepta la invitación desde Instagram.
-4. Define `IG_APP_ID` e `IG_APP_SECRET` y reinicia.
-5. En Conexiones, pulsa Conectar. El token se guarda y se renueva solo.
+La cuenta debe ser Empresa o Creador. Usa Unified Login de Meta; no requiere página de Facebook.
+
+1. En developers.facebook.com crea una app con el caso de uso Instagram API.
+2. En Instagram API, API setup with Unified login, crea una configuración y registra como Redirect URL la que muestra la sección Conexiones.
+3. En App roles, Roles, agrega la cuenta como Instagram Tester y acepta la invitación desde Instagram.
+4. En el servidor define `IG_APP_ID` y `IG_APP_SECRET` (App settings, Basic) e `IG_CONFIG_ID` (Configuration ID). Reinicia.
+5. En Conexiones, pulsa Conectar.
+
+Si Meta no asigna ninguna cuenta, edita la misma configuración en Facebook Login for Business, Configurations, agrega `business_management` y vuelve a conectar.
 
 ## Variables
 
@@ -78,8 +82,9 @@ Para una versión concreta: `content-engine-deploy <sha>`. Si el servicio no res
 | `TIMEZONE` | Zona horaria de los hooks semanales. |
 | `CLAUDE_BIN` | Ruta de Claude Code. |
 | `CHROMIUM_PATH` | Ruta de Chromium. |
-| `IG_APP_ID` | Id de la app de Meta. |
-| `IG_APP_SECRET` | Secreto de la app de Meta. |
+| `IG_APP_ID` | App ID de Meta. |
+| `IG_APP_SECRET` | App secret de Meta. |
+| `IG_CONFIG_ID` | Configuration ID de Unified Login. |
 
 ## Estructura
 

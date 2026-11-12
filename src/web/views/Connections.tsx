@@ -52,7 +52,7 @@ export function Connections({ notice, onChanged }: Props) {
                 <b>Instagram</b>
                 <span className="muted">
                   {info?.connected
-                    ? `${info.username ? `@${info.username}` : 'Conectado'}${days !== null ? ` · renueva solo, vence en ${days} días si deja de renovarse` : ''}`
+                    ? `${info.username ? `@${info.username}` : 'Conectado'}${days !== null ? ` · vence en ${days} días, luego hay que reconectar` : ' · sin vencimiento'}`
                     : 'Sin conectar'}
                 </span>
               </span>
@@ -74,7 +74,7 @@ export function Connections({ notice, onChanged }: Props) {
         </div>
         {info && !info.configured && (
           <p className="banner">
-            Define IG_APP_ID e IG_APP_SECRET en el servidor y reinícialo para activar el botón.
+            Define IG_APP_ID, IG_APP_SECRET e IG_CONFIG_ID en el servidor y reinícialo para activar el botón.
           </p>
         )}
         {info && (

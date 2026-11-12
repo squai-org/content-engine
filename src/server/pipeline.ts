@@ -1,13 +1,11 @@
 import { type Context, runJob } from './agents.ts';
-import { CONNECTION_KEY, type InstagramConnection, TOKEN_LIFETIME_MS } from './connections.ts';
+import { CONNECTION_KEY, type InstagramConnection } from './connections.ts';
 import type { Hook } from './db.ts';
 import type { Item } from './domain.ts';
-import { refreshToken } from './publisher.ts';
 
 const MAX_JOB_ATTEMPTS = 3;
 const RETRY_MINUTES = 10;
 const STALE_MS = 24 * 60 * 60 * 1000;
-const TOKEN_REFRESH_MS = 7 * 24 * 60 * 60 * 1000;
 
 function message(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -93,7 +91,7 @@ export function instagramAccount(ctx: Context) {
 
 export function instagramReady(ctx: Context, now = Date.now()): boolean {
   const saved = savedConnection(ctx);
-  if (saved) return saved.expiresAt > now;
+  if (saved) return saved.expiresAt === null || saved.expiresAt > now;
   return Boolean(ctx.config.igUserId && ctx.config.igAccessToken);
 }
 
@@ -127,23 +125,6 @@ export async function publishDue(ctx: Context, now = new Date()): Promise<void> 
   }
 }
 
-export async function refreshInstagramToken(ctx: Context, now = new Date()): Promise<void> {
-  const saved = savedConnection(ctx);
-  if (!saved || saved.expiresAt <= now.getTime()) return;
-  if (now.getTime() - saved.refreshedAt < TOKEN_REFRESH_MS) return;
-  try {
-    const token = await refreshToken(instagramAccount(ctx));
-    ctx.store.setSetting(CONNECTION_KEY, {
-      ...saved,
-      token,
-      refreshedAt: now.getTime(),
-      expiresAt: now.getTime() + TOKEN_LIFETIME_MS,
-    });
-  } catch (error) {
-    console.error(message(error));
-  }
-}
-
 export function startPipeline(ctx: Context): () => void {
   let working = false;
   let ticking = false;
@@ -162,7 +143,6 @@ export function startPipeline(ctx: Context): () => void {
     try {
       fireWeeklyHooks(ctx);
       await publishDue(ctx);
-      await refreshInstagramToken(ctx);
     } catch (error) {
       console.error(message(error));
     } finally {

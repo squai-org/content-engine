@@ -96,16 +96,3 @@ export function instagramPublisher(options: Options = {}): Publish {
     return { id: published.id, permalink: details.permalink ?? null };
   };
 }
-
-export async function refreshToken(
-  account: InstagramAccount,
-  fetchImpl: typeof fetch = fetch,
-): Promise<string> {
-  const query = new URLSearchParams({ grant_type: 'ig_refresh_token', access_token: account.token });
-  const response = await fetchImpl(`${account.graphUrl}/refresh_access_token?${query}`);
-  const body = (await response.json()) as { access_token?: string; error?: { message?: string } };
-  if (!response.ok || !body.access_token) {
-    throw new Error(`Instagram: ${body.error?.message ?? response.status}`);
-  }
-  return body.access_token;
-}
