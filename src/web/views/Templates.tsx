@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { api, FORMAT_LABEL, type Format, type TemplatePreview } from '../api.ts';
+import { api, ENGINE_LABEL, FORMAT_LABEL, type Format, type TemplatePreview } from '../api.ts';
 import { Frame, Icon, Segmented } from '../ui.tsx';
 import { useFiles } from './Files.tsx';
 
@@ -62,13 +62,21 @@ function Card({ name, service, onOpen }: { name: string; service: string; onOpen
   return (
     <button type="button" className="template-card" onClick={onOpen}>
       <span className="template-stage">
-        {preview ? (
+        {preview?.slides.length ? (
           <Frame html={preview.slides[0]} width={preview.width} height={preview.height} fit={260} />
+        ) : preview ? (
+          <span className="engine-mark">
+            <Icon name="video" size={30} />
+            Abre el template para renderizar una muestra
+          </span>
         ) : (
           <span className="muted">{error ? 'Sin vista previa' : 'Cargando…'}</span>
         )}
       </span>
-      <b>{name.replace(/\.html$/, '')}</b>
+      <b>
+        {name.replace(/\.(html|tsx)$/, '')}
+        {preview && preview.engine !== 'nativo' && <span className="tag engine">{ENGINE_LABEL[preview.engine]}</span>}
+      </b>
       <span className="muted">
         {preview
           ? `${preview.formats.map((format) => FORMAT_LABEL[format as Format] ?? format).join(', ')} · ${preview.width}×${preview.height}`
@@ -101,11 +109,32 @@ export function Templates({ services }: Props) {
     return () => window.removeEventListener('resize', measure);
   }, [measure, mode, files.current]);
 
-  const isHtml = files.current?.endsWith('.html') ?? false;
+  const isHtml = /\.(html|tsx)$/.test(files.current ?? '');
+  const [sample, setSample] = useState<{ key: string; url: string } | null>(null);
+  const [rendering, setRendering] = useState(false);
+  const [sampleError, setSampleError] = useState('');
   const { preview, error } = usePreview(isHtml ? files.content : '', service, 350);
   const usesService = files.content.includes('{{service}}');
-  const templates = files.names.filter((name) => name.endsWith('.html'));
-  const others = files.names.filter((name) => !name.endsWith('.html'));
+  const templates = files.names.filter((name) => /\.(html|tsx)$/.test(name));
+  const others = files.names.filter((name) => !/\.(html|tsx)$/.test(name));
+  const sampleKey = `${files.current}\n${service}\n${files.content}`;
+  const isReel = preview?.formats.includes('reel') ?? false;
+
+  async function renderSample() {
+    setRendering(true);
+    setSampleError('');
+    try {
+      const { url } = await api<{ url: string }>('/templates/sample', 'POST', {
+        content: files.content,
+        service,
+      });
+      setSample({ key: sampleKey, url });
+    } catch (failure) {
+      setSampleError((failure as Error).message);
+    } finally {
+      setRendering(false);
+    }
+  }
 
   if (!files.current) {
     return (
@@ -173,6 +202,7 @@ export function Templates({ services }: Props) {
           onClick={() => {
             if (files.dirty && !window.confirm('Hay cambios sin guardar. ¿Salir?')) return;
             files.close();
+            setSample(null);
             setMode('vista');
             loadList();
           }}
@@ -199,10 +229,16 @@ export function Templates({ services }: Props) {
             onChange={setMode}
           />
         )}
-        {isHtml && preview?.formats.includes('reel') && (
+        {isHtml && isReel && preview && preview.slides.length > 0 && (
           <button type="button" onClick={() => setReplay((count) => count + 1)}>
             <Icon name="play" size={12} />
             Repetir
+          </button>
+        )}
+        {isHtml && isReel && (
+          <button type="button" disabled={rendering} onClick={renderSample}>
+            <Icon name="video" size={14} />
+            {rendering ? 'Renderizando…' : 'Renderizar muestra'}
           </button>
         )}
         <button type="button" className="destructive" onClick={files.remove}>
@@ -231,7 +267,27 @@ export function Templates({ services }: Props) {
         {isHtml && (
           <div className="template-preview" ref={stage}>
             {error && <p className="banner error">{error}</p>}
-            {preview && (
+            {sampleError && <p className="banner error">{sampleError}</p>}
+            {rendering && (
+              <p className="banner working">
+                <span className="typing">
+                  <i />
+                  <i />
+                  <i />
+                </span>
+                Renderizando un video de muestra con {preview ? ENGINE_LABEL[preview.engine] : 'el motor'}. Puede tardar un
+                minuto.
+              </p>
+            )}
+            {sample?.key === sampleKey && (
+              <video className="sample" src={sample.url} controls autoPlay loop muted playsInline style={{ height: fit }} />
+            )}
+            {preview && preview.slides.length === 0 && sample?.key !== sampleKey && !rendering && (
+              <p className="empty">
+                Los templates de Remotion no tienen vista previa en vivo. Pulsa «Renderizar muestra» para ver el video.
+              </p>
+            )}
+            {preview && preview.slides.length > 0 && sample?.key !== sampleKey && (
               <>
                 <div className="strip" key={replay}>
                   {preview.slides.map((html, index) => (
@@ -239,11 +295,14 @@ export function Templates({ services }: Props) {
                   ))}
                 </div>
                 <p className="muted note">
-                  {preview.slides.length > 1
-                    ? `${preview.slides.length} láminas de muestra, contiguas como en la publicación.`
-                    : 'Lámina de muestra.'}{' '}
+                  {preview.engine === 'hyperframes'
+                    ? 'Composición de muestra en bucle.'
+                    : preview.slides.length > 1
+                      ? `${preview.slides.length} láminas de muestra, contiguas como en la publicación.`
+                      : 'Lámina de muestra.'}{' '}
                   El texto real lo escribe el agente. {preview.width}×{preview.height} ·{' '}
-                  {preview.formats.map((format) => FORMAT_LABEL[format as Format] ?? format).join(', ')}
+                  {preview.formats.map((format) => FORMAT_LABEL[format as Format] ?? format).join(', ')} ·{' '}
+                  {ENGINE_LABEL[preview.engine]}
                 </p>
               </>
             )}

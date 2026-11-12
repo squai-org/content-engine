@@ -2029,3 +2029,29 @@ a:focus-visible {
     padding: 0 4px 4px;
   }
 }
+
+.engine-mark {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  padding: 0 24px;
+  color: var(--text-secondary);
+  font-size: 13px;
+  text-align: center;
+}
+
+.tag.engine {
+  --tone: var(--purple);
+  margin: 0 0 0 8px;
+  height: 20px;
+  padding: 0 8px;
+  font-size: 11px;
+  vertical-align: middle;
+}
+
+.sample {
+  flex: none;
+  border-radius: 12px;
+  box-shadow: 0 10px 30px rgba(10, 10, 50, 0.22);
+}

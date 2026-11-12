@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="es" data-resolution="portrait">
+<head>
+<meta charset="utf-8">
+<meta name="size" content="1080x1920">
+<meta name="formats" content="reel">
+<meta name="engine" content="hyperframes">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Familjen+Grotesk:wght@700&family=Atkinson+Hyperlegible+Next:wght@400;600&family=Gloria+Hallelujah&display=swap">
+<script src="https://cdn.jsdelivr.net/npm/gsap@3.15.0/dist/gsap.min.js"></script>
+<style>
+:root { --mid: #0A0C1A; --canvas: #F4F6FF; --main: #44d4c8; --main3: #c8f1ec; --hl: #f9c24d; --head: 'Familjen Grotesk', 'Arial Narrow', sans-serif; --body: 'Atkinson Hyperlegible Next', 'Segoe UI', sans-serif; --hand: 'Gloria Hallelujah', cursive; }
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { width: 1080px; height: 1920px; overflow: hidden; background: var(--canvas); }
+#root { position: relative; width: 1080px; height: 1920px; overflow: hidden; color: var(--mid); font-family: var(--body); }
+#wash { position: absolute; inset: 0; background: var(--main); }
+#grid { position: absolute; inset: -240px 0; background-image: linear-gradient(to right, rgba(10, 12, 26, 0.07) 2px, transparent 2px), linear-gradient(to bottom, rgba(10, 12, 26, 0.07) 2px, transparent 2px); background-size: 180px 240px; }
+.shape { position: absolute; border-radius: 31%; background: var(--main3); }
+#shape-a { left: -200px; top: 1480px; width: 580px; height: 590px; }
+#shape-b { right: -220px; top: 110px; width: 480px; height: 490px; }
+#shape-c { left: 620px; top: 1180px; width: 260px; height: 264px; opacity: 0.7; }
+#progress { position: absolute; left: 90px; right: 90px; top: 150px; height: 8px; border-radius: 4px; background: rgba(10, 12, 26, 0.18); overflow: hidden; z-index: 4; }
+#progress i { display: block; width: 100%; height: 100%; background: var(--mid); transform-origin: left; transform: scaleX(0); }
+#handle { position: absolute; left: 90px; top: 196px; z-index: 4; font-family: var(--head); font-weight: 700; font-size: 44px; letter-spacing: -0.5px; }
+.scene { position: absolute; left: 90px; right: 90px; top: 290px; bottom: 460px; z-index: 2; display: flex; flex-direction: column; justify-content: center; gap: 44px; visibility: hidden; }
+.kicker { align-self: flex-start; padding: 10px 26px; border-radius: 999px; background: var(--mid); color: var(--canvas); font-weight: 600; font-size: 34px; letter-spacing: 0.04em; text-transform: uppercase; }
+.t { font-family: var(--head); font-weight: 700; font-size: 128px; letter-spacing: -0.03em; line-height: 1.12; text-wrap: balance; }
+.w { display: inline-block; }
+.mark { position: relative; display: inline-block; padding: 0 0.16em; margin: 0 -0.06em; white-space: nowrap; }
+.mark::before { content: ''; position: absolute; inset: 0.08em 0 0.02em; z-index: -1; border-radius: 0.3em; background: var(--hl); transform-origin: left; transform: scaleX(var(--ink, 0)); }
+.sup { font-size: 54px; line-height: 1.32; text-wrap: balance; }
+.annot { font-family: var(--hand); font-size: 50px; line-height: 1.3; transform-origin: left; }
+.src { font-weight: 600; font-size: 30px; opacity: 0.7; }
+#url { position: absolute; left: 90px; bottom: 470px; z-index: 3; font-family: var(--head); font-weight: 700; font-size: 64px; letter-spacing: -1px; visibility: hidden; }
+</style>
+</head>
+<body>
+<div id="root" data-composition-id="main" data-start="0" data-duration="{{duration}}" data-width="1080" data-height="1920">
+<div id="wash"></div>
+<div id="grid"></div>
+<div class="shape" id="shape-a"></div>
+<div class="shape" id="shape-b"></div>
+<div class="shape" id="shape-c"></div>
+<div id="progress"><i></i></div>
+<div id="handle">@heysquai</div>
+<div id="url">squai.io</div>
+</div>
+<script>
+const DATA = {{data}};
+const SERVICES = {
+  grow: { main: "#44d4c8", main3: "#c8f1ec", hl: "#f9c24d" },
+  learn: { main: "#f9c24d", main3: "#ffe6a6", hl: "#8a8ef9" },
+  one: { main: "#8a8ef9", main3: "#e4e6f7", hl: "#44d4c8" },
+};
+const service = SERVICES[String(DATA.service).trim().toLowerCase()] || SERVICES.grow;
+const style = document.documentElement.style;
+style.setProperty("--main", service.main);
+style.setProperty("--main3", service.main3);
+style.setProperty("--hl", service.hl);
+
+const root = document.getElementById("root");
+const node = (tag, name, text) => {
+  const element = document.createElement(tag);
+  element.className = name;
+  if (text) element.textContent = text;
+  return element;
+};
+function title(text) {
+  const heading = node("h1", "t");
+  text.split(/(\[\[.+?\]\])/).filter(Boolean).forEach((part) => {
+    const marked = part.startsWith("[[");
+    const holder = marked ? node("span", "mark") : heading;
+    (marked ? part.slice(2, -2) : part).split(/(\s+)/).forEach((word) => {
+      if (word.trim()) holder.append(node("span", "w", word));
+      else if (word) holder.append(" ");
+    });
+    if (marked) heading.append(holder);
+  });
+  return heading;
+}
+const scenes = DATA.scenes.map((scene) => {
+  const box = node("section", "scene");
+  if (scene.kicker) box.append(node("div", "kicker", scene.kicker));
+  box.append(title(scene.title));
+  if (scene.body) box.append(node("p", "sup", scene.body.replace(/\[\[|\]\]/g, "")));
+  if (scene.note) box.append(node("p", "annot", scene.note));
+  if (scene.source) box.append(node("p", "src", scene.source));
+  root.append(box);
+  const heading = box.querySelector(".t");
+  let size = 128;
+  while (size > 64 && (box.scrollHeight > box.clientHeight || heading.scrollWidth > heading.clientWidth)) {
+    size -= 4;
+    heading.style.fontSize = `${size}px`;
+  }
+  return box;
+});
+
+const timeline = gsap.timeline({ paused: true });
+const tl = {
+  to: (target, vars, at) => (target.length === 0 ? tl : (timeline.to(target, vars, at), tl)),
+  set: (target, vars, at) => (timeline.set(target, vars, at), tl),
+  fromTo: (target, from, to, at) => (target.length === 0 ? tl : (timeline.fromTo(target, from, to, at), tl)),
+};
+const total = DATA.duration;
+const last = scenes.length - 1;
+tl.to("#progress i", { scaleX: 1, duration: total, ease: "none" }, 0);
+tl.to("#grid", { y: 240, duration: total, ease: "none" }, 0);
+tl.fromTo("#shape-a", { rotation: -8 }, { rotation: 10, x: 90, y: -160, duration: total, ease: "sine.inOut" }, 0);
+tl.fromTo("#shape-b", { rotation: 6 }, { rotation: -12, x: -70, y: 120, duration: total, ease: "sine.inOut" }, 0);
+tl.fromTo("#shape-c", { rotation: 0, scale: 0.6 }, { rotation: 40, scale: 1.1, y: -220, duration: total, ease: "sine.inOut" }, 0);
+
+DATA.scenes.forEach((scene, index) => {
+  const box = scenes[index];
+  const at = scene.start;
+  const words = box.querySelectorAll(".w");
+  const colored = index === 0 || index === last;
+  tl.to("#wash", { opacity: colored ? 1 : 0, duration: 0.5, ease: "power2.inOut" }, Math.max(0, at - 0.25));
+  tl.set(box, { visibility: "visible" }, at);
+  tl.fromTo(box.querySelectorAll(".kicker"), { opacity: 0, x: -60 }, { opacity: 1, x: 0, duration: 0.45, ease: "power4.out" }, at + 0.05);
+  tl.fromTo(words, { opacity: 0, y: 70, rotation: 4 }, { opacity: 1, y: 0, rotation: 0, duration: 0.55, ease: "back.out(1.6)", stagger: 0.06 }, at + 0.15);
+  const after = at + 0.35 + words.length * 0.06;
+  tl.fromTo(box.querySelectorAll(".mark"), { "--ink": 0 }, { "--ink": 1, duration: 0.45, ease: "power3.out" }, after);
+  tl.fromTo(box.querySelectorAll(".sup, .src"), { opacity: 0, y: 40 }, { opacity: 1, y: 0, duration: 0.5, ease: "power3.out", stagger: 0.1 }, after + 0.1);
+  tl.fromTo(box.querySelectorAll(".annot"), { opacity: 0, scale: 0.8, rotation: -8 }, { opacity: 1, scale: 1, rotation: -2, duration: 0.5, ease: "back.out(2)" }, after + 0.55);
+  if (index < last) {
+    const out = at + scene.seconds - 0.35;
+    tl.to(box, { opacity: 0, y: -120, scale: 0.94, duration: 0.35, ease: "power3.in" }, out);
+    tl.set(box, { visibility: "hidden" }, at + scene.seconds);
+  } else {
+    tl.set("#url", { visibility: "visible" }, after);
+    tl.fromTo("#url", { opacity: 0, y: 40 }, { opacity: 1, y: 0, duration: 0.5, ease: "power3.out" }, after + 0.4);
+  }
+});
+
+window.__timelines = window.__timelines || {};
+window.__timelines["main"] = timeline;
+timeline.seek(0);
+if (window.__preview) timeline.repeat(-1).repeatDelay(1.2).play();
+</script>
+</body>
+</html>

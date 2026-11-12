@@ -16,7 +16,7 @@ Cada ejecución de un agente se ve en Actividad como una conversación, y se pue
 - Node 22.18 o superior
 - Claude Code con sesión iniciada
 - Chromium
-- ffmpeg, para exportar los reels
+- ffmpeg y ffprobe, para exportar los reels
 - Cuenta profesional de Instagram y una app de Meta
 
 ## Desarrollo local
@@ -88,7 +88,21 @@ Un template es un HTML con dos etiquetas `meta`: `size` (por ejemplo `1080x1350`
 | `{{seconds}}` | Duración de la escena en un reel. |
 | `{{tokens}}` | Contenido de `tokens.css`. |
 
-En un reel cada lámina es una escena. El servidor recorre las animaciones CSS del template cuadro a cuadro y las codifica en MP4 a 30 fps.
+### Reels
+
+En un reel cada lámina es una escena. La etiqueta `meta` `engine` del template elige el motor que exporta el MP4 a 30 fps:
+
+| Motor | Template | Cómo anima |
+| --- | --- | --- |
+| `hyperframes` | HTML con una línea de tiempo de GSAP registrada en `window.__timelines` | [HyperFrames](https://github.com/heygen-com/hyperframes) recorre la línea de tiempo cuadro a cuadro |
+| `remotion` | Archivo `.tsx` que exporta por defecto un componente de React | [Remotion](https://www.remotion.dev) lo compila y lo renderiza |
+| sin etiqueta | HTML con animaciones CSS, una página por escena | El servidor recorre las animaciones cuadro a cuadro |
+
+Los templates de `hyperframes` reciben las escenas en `{{data}}` (`service`, `duration` y `scenes` con `kicker`, `title`, `body`, `note`, `source`, `start` y `seconds`) y la duración total en `{{duration}}`. Los de `remotion` reciben el mismo objeto como props. En un `.tsx` las etiquetas `meta` van dentro de un comentario al inicio.
+
+En Templates, «Renderizar muestra» exporta un video de prueba con el motor del template.
+
+Remotion es gratuito para personas y empresas de hasta 3 empleados. Una empresa más grande necesita su [licencia de empresa](https://www.remotion.dev/docs/license). HyperFrames usa licencia Apache 2.0 y GSAP su licencia estándar sin costo.
 
 ## Límites de Oracle
 
@@ -114,6 +128,7 @@ La sección Servidor muestra procesador, memoria, disco y tráfico de salida fre
 | `CLAUDE_BIN` | Ruta de Claude Code. |
 | `CHROMIUM_PATH` | Ruta de Chromium. |
 | `FFMPEG_PATH` | Ruta de ffmpeg. Por defecto `ffmpeg`. |
+| `HEADLESS_SHELL_PATH` | Ruta de Chrome Headless Shell para HyperFrames y Remotion. Por defecto usa el que instala Playwright. |
 | `IG_APP_ID` | App ID de Meta. |
 | `IG_APP_SECRET` | App secret de Meta. |
 | `IG_CONFIG_ID` | Configuration ID de Unified Login. |

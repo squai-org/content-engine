@@ -29,7 +29,15 @@ import {
 } from '../src/server/pipeline.ts';
 import { instagramPublisher, type Publication } from '../src/server/publisher.ts';
 import { addEgress, createMonitor, transmittedBytes } from '../src/server/monitor.ts';
-import { buildSlideHtml, type RenderJob, type VideoJob } from '../src/server/render.ts';
+import { findHeadlessShell } from '../src/server/engines.ts';
+import {
+  buildCompositionHtml,
+  buildSlideHtml,
+  type CompositionJob,
+  compositionData,
+  type RenderJob,
+  type VideoJob,
+} from '../src/server/render.ts';
 import { createWorkspace, syncSeed } from '../src/server/workspace.ts';
 
 const slide = { kicker: 'Anti-humo', title: 'La IA no piensa por ti', body: 'Genera volumen.' };
@@ -45,6 +53,7 @@ function setup(executor: Executor, env: Record<string, string> = {}) {
   const rendered: RenderJob[] = [];
   const published: Publication[] = [];
   const videos: VideoJob[] = [];
+  const compositions: CompositionJob[] = [];
   const config = loadConfig({
     ADMIN_PASSWORD: 'clave',
     SESSION_SECRET: 'secreto',
@@ -64,6 +73,9 @@ function setup(executor: Executor, env: Record<string, string> = {}) {
     video: async (job) => {
       videos.push(job);
     },
+    compose: async (job) => {
+      compositions.push(job);
+    },
     publish: async (_account, publication) => {
       published.push(publication);
       return { id: '1', permalink: 'https://instagram.com/p/x' };
@@ -71,7 +83,7 @@ function setup(executor: Executor, env: Record<string, string> = {}) {
     monitor: createMonitor(config, store),
   };
   ctx.monitor.stop();
-  return { ctx, rendered, published, videos };
+  return { ctx, rendered, published, videos, compositions };
 }
 
 async function login(app: ReturnType<typeof createApp>): Promise<string> {
@@ -585,6 +597,7 @@ test('un reel se produce como video con una escena por lámina', async () => {
   assert.match(prompts[1], /entre 3 y 9 escenas/);
   const produced = ctx.store.getItem(item.id);
   assert.equal(produced?.status, 'revision');
+  assert.equal(produced?.spec?.template, 'reel-squai.html');
   assert.deepEqual(produced?.assets, [`${item.id}/v1.mp4`]);
   assert.equal(rendered.length, 0);
   assert.equal(videos.length, 1);
@@ -800,4 +813,96 @@ test('analítica de instagram tolera la falta de permisos', async () => {
   assert.equal(insights.media[1].reach, null);
   assert.equal(insights.media[1].type, 'REELS');
   assert.match(insights.warning, /instagram_manage_insights/);
+});
+
+test('un reel con template de hyperframes o remotion se compone con ese motor', async () => {
+  const scenes = [slide, { ...slide, title: 'Dos' }, { ...slide, title: 'Tres <[[clave]]>' }];
+  const templates = ['reel-remotion.tsx (remotion)', 'no-existe.html'];
+  const { ctx, compositions, videos } = setup(async () => ({
+    ...proposal,
+    template: templates.shift() as string,
+    slides: scenes,
+    script: 'Guion.',
+  }));
+  const prompts: string[] = [];
+  const executor = ctx.executor;
+  ctx.executor = (input) => {
+    prompts.push(input.prompt);
+    return executor(input);
+  };
+  const first = ctx.store.createItem({ title: 'x', format: 'reel', service: 'Grow' });
+  ctx.store.enqueue('produce', 'productor', first.id);
+  await workOnce(ctx);
+  assert.match(prompts[0], /reel-hyperframes\.html \(hyperframes\), reel-remotion\.tsx \(remotion\), reel-squai\.html/);
+  assert.equal(videos.length, 0);
+  assert.equal(compositions[0].engine, 'remotion');
+  assert.match(compositions[0].template, /TransitionSeries/);
+  assert.equal(compositions[0].data.service, 'Grow');
+  assert.equal(compositions[0].data.scenes.length, 3);
+  assert.equal(compositions[0].data.scenes[1].start, sceneSeconds(slide));
+  assert.equal(compositions[0].path.endsWith(`${first.id}/v1.mp4`), true);
+  assert.equal(ctx.store.getItem(first.id)?.spec?.template, 'reel-remotion.tsx');
+
+  const second = ctx.store.createItem({ title: 'y', format: 'reel' });
+  ctx.store.enqueue('produce', 'productor', second.id);
+  await workOnce(ctx);
+  assert.equal(compositions[1].engine, 'hyperframes');
+  const html = buildCompositionHtml(compositions[1].template, '', compositions[1].data);
+  assert.match(html, /data-duration="\d+(\.\d)?"/);
+  assert.match(html, /"title":"Tres \\u003c\[\[clave\]\]>"/);
+  assert.doesNotMatch(html, /\{\{data\}\}/);
+
+  const data = compositionData('One', [slide, slide], () => 2.5);
+  assert.equal(data.duration, 5);
+  assert.deepEqual(
+    data.scenes.map((scene) => scene.start),
+    [0, 2.5],
+  );
+});
+
+test('api: vista previa y muestra de templates con motor', async () => {
+  const { ctx, compositions, videos } = setup(async () => proposal);
+  const app = createApp(ctx);
+  const headers = { cookie: await login(app) };
+  const read = (name: string) => readFileSync(join(ctx.workspace.root, 'templates', name), 'utf8');
+  const post = (path: string, content: string) =>
+    app.request(path, { method: 'POST', headers, body: JSON.stringify({ content, service: 'One' }) });
+
+  const hyper = (await (await post('/api/templates/preview', read('reel-hyperframes.html'))).json()) as {
+    engine: string;
+    slides: string[];
+  };
+  assert.equal(hyper.engine, 'hyperframes');
+  assert.equal(hyper.slides.length, 1);
+  assert.match(hyper.slides[0], /<head><script>window\.__preview=true<\/script>/);
+  assert.doesNotMatch(hyper.slides[0], /cdn\.jsdelivr\.net/);
+  assert.match(hyper.slides[0], /GSAP 3\.15\.0/);
+  const remotion = (await (await post('/api/templates/preview', read('reel-remotion.tsx'))).json()) as {
+    engine: string;
+    slides: string[];
+  };
+  assert.deepEqual([remotion.engine, remotion.slides.length], ['remotion', 0]);
+  assert.equal(ctx.workspace.templatesFor('reel').length, 3);
+
+  const sample = await post('/api/templates/sample', read('reel-remotion.tsx'));
+  const { url } = (await sample.json()) as { url: string };
+  assert.match(url, /^\/media\/_muestras\/[0-9a-f]{16}\.mp4$/);
+  assert.equal(compositions.length, 1);
+  assert.equal(compositions[0].data.scenes.length, 4);
+  await post('/api/templates/sample', read('reel-squai.html'));
+  assert.equal(videos.length, 1);
+  assert.equal((await post('/api/templates/sample', read('editorial.html'))).status, 400);
+});
+
+test('encuentra el headless shell de playwright', () => {
+  const root = mkdtempSync(join(tmpdir(), 'pw-'));
+  assert.equal(findHeadlessShell([join(root, 'nada'), root]), undefined);
+  for (const build of ['chromium_headless_shell-1100', 'chromium_headless_shell-1243', 'chromium-1243']) {
+    mkdirSync(join(root, build, 'chrome-headless-shell-linux64'), { recursive: true });
+    writeFileSync(join(root, build, 'chrome-headless-shell-linux64', 'chrome-headless-shell'), '');
+  }
+  assert.equal(
+    findHeadlessShell([root]),
+    join(root, 'chromium_headless_shell-1243', 'chrome-headless-shell-linux64', 'chrome-headless-shell'),
+  );
 });

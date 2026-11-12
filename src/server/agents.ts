@@ -13,7 +13,13 @@ import {
   type Slide,
 } from './domain.ts';
 import type { Publish } from './publisher.ts';
-import { buildSlideHtml, type Renderer, type VideoRenderer } from './render.ts';
+import {
+  buildSlideHtml,
+  type Composer,
+  compositionData,
+  type Renderer,
+  type VideoRenderer,
+} from './render.ts';
 import type { Workspace } from './workspace.ts';
 
 export type AgentEvent = {
@@ -38,6 +44,7 @@ export type Context = {
   executor: Executor;
   renderer: Renderer;
   video: VideoRenderer;
+  compose: Composer;
   publish: Publish;
   monitor: Monitor;
 };
@@ -301,7 +308,9 @@ const FORMAT_RULES = [
 ].join('\n');
 
 function templatesBrief(ctx: Context, item: Item): string {
-  const names = ctx.workspace.templatesFor(item.format).map((template) => template.name);
+  const names = ctx.workspace
+    .templatesFor(item.format)
+    .map((template) => (template.engine === 'nativo' ? template.name : `${template.name} (${template.engine})`));
   return names.length ? names.join(', ') : 'ninguno';
 }
 
@@ -445,7 +454,25 @@ async function applyProposal(run: Run, item: Item, proposal: Proposal): Promise<
       });
     templateName = template.name;
     run.signal?.throwIfAborted();
-    if (item.format === 'reel') {
+    if (item.format === 'reel' && template.engine !== 'nativo') {
+      assets = [`${item.id}/v${iteration}.mp4`];
+      const data = compositionData(item.service, proposal.slides, sceneSeconds);
+      log(
+        run,
+        'step',
+        'Renderizando video',
+        `${total} escenas · ${Math.round(data.duration)} s · ${template.name} · ${template.engine}`,
+      );
+      await ctx.compose({
+        engine: template.engine,
+        template: html,
+        data,
+        width: template.width,
+        height: template.height,
+        path: join(mediaDir, assets[0]),
+        signal: run.signal,
+      });
+    } else if (item.format === 'reel') {
       assets = [`${item.id}/v${iteration}.mp4`];
       const scenes = proposal.slides.map((slide, index) => {
         const seconds = sceneSeconds(slide);

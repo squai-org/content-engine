@@ -18,14 +18,22 @@ type KindSpec = { dir: string; extensions: string[]; nested?: string };
 
 const SPECS: Record<Kind, KindSpec> = {
   bases: { dir: 'bases', extensions: ['.md'] },
-  templates: { dir: 'templates', extensions: ['.html', '.css'] },
+  templates: { dir: 'templates', extensions: ['.html', '.css', '.tsx'] },
   skills: { dir: '.claude/skills', extensions: [], nested: 'SKILL.md' },
   agents: { dir: '.claude/agents', extensions: ['.md'] },
 };
 
 const NAME = /^[a-z0-9][a-z0-9-]*(\.[a-z]+)?$/;
 
-export type TemplateInfo = { name: string; width: number; height: number; formats: string[] };
+export const ENGINES = ['nativo', 'hyperframes', 'remotion'] as const;
+export type Engine = (typeof ENGINES)[number];
+export type TemplateInfo = {
+  name: string;
+  width: number;
+  height: number;
+  formats: string[];
+  engine: Engine;
+};
 
 export function isKind(value: string): value is Kind {
   return KINDS.includes(value as Kind);
@@ -57,10 +65,12 @@ export function templateMeta(html: string): Omit<TemplateInfo, 'name'> | null {
   const size = /<meta name="size" content="(\d+)x(\d+)"/.exec(html);
   const formats = /<meta name="formats" content="([^"]+)"/.exec(html);
   if (!size || !formats) return null;
+  const engine = /<meta name="engine" content="([^"]+)"/.exec(html)?.[1] as Engine | undefined;
   return {
     width: Number(size[1]),
     height: Number(size[2]),
     formats: formats[1].split(',').map((format) => format.trim()),
+    engine: engine && ENGINES.includes(engine) ? engine : 'nativo',
   };
 }
 
@@ -133,7 +143,7 @@ export function createWorkspace(root: string, seedDir: string) {
 
   function templateInfo(name: string): TemplateInfo | null {
     const html = read('templates', name);
-    if (!html || !name.endsWith('.html')) return null;
+    if (!html || name.endsWith('.css')) return null;
     const meta = templateMeta(html);
     return meta ? { name, ...meta } : null;
   }
@@ -163,7 +173,8 @@ export function createWorkspace(root: string, seedDir: string) {
 
     pickTemplate(preferred: string, format: Format): TemplateInfo {
       const options = templatesFor(format);
-      const match = options.find((option) => option.name === preferred) ?? options[0];
+      const wanted = preferred.trim().split(/\s/)[0];
+      const match = options.find((option) => option.name === wanted) ?? options[0];
       if (!match) throw new Error(`No hay template para el formato ${format}.`);
       return match;
     },

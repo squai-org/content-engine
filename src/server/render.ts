@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process';
 import { mkdirSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import { dirname } from 'node:path';
 import { type Browser, chromium, type Page } from 'playwright-core';
 import type { Slide } from './domain.ts';
@@ -16,6 +17,19 @@ export type VideoJob = {
   signal?: AbortSignal;
 };
 export type VideoRenderer = (job: VideoJob) => Promise<void>;
+
+export type CompositionScene = Required<Slide> & { start: number; seconds: number };
+export type CompositionData = { service: string; duration: number; scenes: CompositionScene[] };
+export type CompositionJob = {
+  engine: 'hyperframes' | 'remotion';
+  template: string;
+  data: CompositionData;
+  width: number;
+  height: number;
+  path: string;
+  signal?: AbortSignal;
+};
+export type Composer = (job: CompositionJob) => Promise<void>;
 
 export const VIDEO_FPS = 30;
 const FONT_WAIT_MS = 8000;
@@ -64,6 +78,44 @@ export function buildSlideHtml(
     seconds: '4',
   };
   for (const [key, value] of Object.entries(context)) values[key] = escapeHtml(value);
+  return template.replace(/\{\{(\w+)\}\}/g, (match, key: string) => values[key] ?? match);
+}
+
+export function compositionData(service: string, slides: Slide[], secondsOf: (slide: Slide) => number): CompositionData {
+  let start = 0;
+  const scenes = slides.map((slide) => {
+    const seconds = secondsOf(slide);
+    const scene = {
+      kicker: slide.kicker,
+      title: slide.title,
+      body: slide.body,
+      note: slide.note ?? '',
+      source: slide.source ?? '',
+      start,
+      seconds,
+    };
+    start = Math.round((start + seconds) * 10) / 10;
+    return scene;
+  });
+  return { service, duration: start, scenes };
+}
+
+const GSAP_TAG = /<script src="https:\/\/cdn\.jsdelivr\.net\/npm\/gsap@[^"]*"><\/script>/;
+
+export function gsapPath(): string {
+  return createRequire(import.meta.url).resolve('gsap/dist/gsap.min.js');
+}
+
+export function localGsap(html: string, replacement: string): string {
+  return html.replace(GSAP_TAG, () => replacement);
+}
+
+export function buildCompositionHtml(template: string, tokens: string, data: CompositionData): string {
+  const values: Record<string, string> = {
+    tokens,
+    data: JSON.stringify(data).replace(/</g, '\\u003c'),
+    duration: String(data.duration),
+  };
   return template.replace(/\{\{(\w+)\}\}/g, (match, key: string) => values[key] ?? match);
 }
 

@@ -1,5 +1,5 @@
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { extname, join, normalize, resolve } from 'node:path';
 import { type Context as Request, Hono } from 'hono';
 import { deleteCookie, getSignedCookie, setSignedCookie } from 'hono/cookie';
@@ -18,7 +18,7 @@ import {
   requestRun,
   savedConnection,
 } from './pipeline.ts';
-import { buildSlideHtml } from './render.ts';
+import { buildCompositionHtml, buildSlideHtml, compositionData, gsapPath, localGsap } from './render.ts';
 import { isKind, templateMeta } from './workspace.ts';
 
 const COOKIE = 'ce_session';
@@ -54,6 +54,8 @@ const INSIGHTS_KEY = 'insights';
 const INSIGHTS_TTL_MS = 15 * 60 * 1000;
 const TIME = /^([01]\d|2[0-3]):[0-5]\d$/;
 const MAX_PIECES = 21;
+const SAMPLES = '_muestras';
+const KEEP_SAMPLES = 6;
 
 const SAMPLE_SLIDES: Slide[] = [
   {
@@ -220,15 +222,84 @@ export function createApp(ctx: Context, fetchImpl: typeof fetch = fetch): Hono {
     const multiple = meta.formats.includes('carrusel') || meta.formats.includes('reel');
     const slides = multiple ? SAMPLE_SLIDES : SAMPLE_SLIDES.slice(0, 1);
     const tokens = workspace.tokens();
+    const service = body.service ?? '';
+    if (meta.engine === 'remotion') return c.json({ ...meta, slides: [] });
+    if (meta.engine === 'hyperframes') {
+      const html = buildCompositionHtml(content, tokens, compositionData(service, slides, sceneSeconds));
+      return c.json({
+        ...meta,
+        slides: [
+          localGsap(html, `<script>${readFileSync(gsapPath(), 'utf8')}</script>`).replace(
+            /<head[^>]*>/i,
+            (head) => `${head}<script>window.__preview=true</script>`,
+          ),
+        ],
+      });
+    }
     return c.json({
       ...meta,
       slides: slides.map((slide, index) =>
         buildSlideHtml(content, tokens, slide, index, slides.length, {
-          service: body.service ?? '',
+          service,
           seconds: String(sceneSeconds(slide)),
         }),
       ),
     });
+  });
+
+  let sampling = false;
+
+  app.post('/api/templates/sample', async (c) => {
+    const body = (await c.req.json()) as { content?: string; service?: string };
+    const content = body.content ?? '';
+    const service = body.service ?? '';
+    const meta = templateMeta(content);
+    if (!meta?.formats.includes('reel')) {
+      return c.json({ error: 'Solo los templates de reel generan un video de muestra.' }, 400);
+    }
+    const name = `${createHash('sha256').update(`${service}\n${content}`).digest('hex').slice(0, 16)}.mp4`;
+    const dir = join(config.dataDir, 'media', SAMPLES);
+    const path = join(dir, name);
+    const url = `/media/${SAMPLES}/${name}`;
+    if (existsSync(path)) return c.json({ url });
+    if (sampling) return c.json({ error: 'Ya hay una muestra renderizándose. Espera a que termine.' }, 409);
+    sampling = true;
+    try {
+      mkdirSync(dir, { recursive: true });
+      const scenes = SAMPLE_SLIDES.slice(0, 4);
+      const size = { width: meta.width, height: meta.height, path };
+      if (meta.engine === 'nativo') {
+        const tokens = workspace.tokens();
+        await ctx.video({
+          ...size,
+          scenes: scenes.map((slide, index) => {
+            const seconds = sceneSeconds(slide);
+            return {
+              html: buildSlideHtml(content, tokens, slide, index, scenes.length, {
+                service,
+                seconds: String(seconds),
+              }),
+              seconds,
+            };
+          }),
+        });
+      } else {
+        await ctx.compose({
+          ...size,
+          engine: meta.engine,
+          template: content,
+          data: compositionData(service, scenes, sceneSeconds),
+        });
+      }
+      const old = readdirSync(dir)
+        .map((file) => ({ file, at: statSync(join(dir, file)).mtimeMs }))
+        .sort((a, b) => b.at - a.at)
+        .slice(KEEP_SAMPLES);
+      for (const entry of old) rmSync(join(dir, entry.file), { force: true });
+      return c.json({ url });
+    } finally {
+      sampling = false;
+    }
   });
 
   function connectionInfo() {

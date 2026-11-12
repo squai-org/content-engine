@@ -12,7 +12,7 @@ description: Guion y escenas de un reel de Instagram que el servidor anima y exp
 5. Una idea por escena. Si una escena necesita más de 25 palabras, divídela.
 6. Resalta una sola frase por título con `[[ ]]`: la que debe quedar si solo se lee eso.
 7. Última escena: la única llamada a la acción de la pieza.
-8. Elige en `template` un template de formato reel.
+8. Elige en `template` un template de formato reel según la tabla de templates y motores de `bases/sistema-de-video.md`. Escribe solo el nombre del archivo.
 9. Suma las palabras: el video completo debe durar entre 15 y 40 segundos, a unas 3 palabras por segundo.
 
 El `copy` del reel sigue la skill copy-instagram.

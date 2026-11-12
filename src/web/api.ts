@@ -69,7 +69,19 @@ export type Hook = {
   enabled: boolean;
   last_fired: string | null;
 };
-export type TemplatePreview = { width: number; height: number; formats: string[]; slides: string[] };
+export type Engine = 'nativo' | 'hyperframes' | 'remotion';
+export type TemplatePreview = {
+  width: number;
+  height: number;
+  formats: string[];
+  engine: Engine;
+  slides: string[];
+};
+export const ENGINE_LABEL: Record<Engine, string> = {
+  nativo: 'CSS',
+  hyperframes: 'HyperFrames',
+  remotion: 'Remotion',
+};
 export type Sample = { at: number; cpu: number; memory: number };
 export type ServerSnapshot = {
   limits: { ocpu: number; memoryGb: number; storageGb: number; egressTb: number };
