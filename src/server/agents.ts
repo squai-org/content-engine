@@ -88,14 +88,15 @@ const PLAN_SCHEMA = {
         additionalProperties: false,
       },
     },
+    research: { type: 'string' },
   },
-  required: ['items'],
+  required: ['items', 'research'],
   additionalProperties: false,
 };
 
 type Proposal = { copy: string; template: string; slides: Slide[]; script: string };
 type Revision = Proposal & { learning: string };
-type Plan = { items: Record<string, string>[] };
+type Plan = { items: Record<string, string>[]; research: string };
 
 export function claudeExecutor(bin: string): Executor {
   return ({ agent, prompt, schema, cwd }) =>
@@ -224,6 +225,7 @@ function planPrompt(ctx: Context, from: string, to: string): string {
     `Formatos: ${FORMATS.join(', ')}.`,
     `Ya programado en ese rango:\n${scheduled.join('\n') || 'nada'}`,
     `Títulos recientes que no se repiten:\n${ctx.store.recentTitles(40).join('\n') || 'ninguno'}`,
+    'En research escribe, en Markdown, lo que investigaste para esta semana: fechas que activan algo en el lector, noticias de IA que cambian algo concreto, y por qué elegiste cada ángulo. Cita la URL de cada hecho externo. Deja fuera lo que no puedas verificar.',
     'scheduled_at va en ISO 8601 con offset de la zona horaria. Devuelve solo el JSON pedido.',
   ].join('\n\n');
 }
@@ -330,6 +332,13 @@ async function plan(ctx: Context, job: Job): Promise<Item[]> {
     schema: PLAN_SCHEMA,
     cwd: ctx.workspace.root,
   })) as Plan;
+  if (output.research?.trim()) {
+    ctx.workspace.write(
+      'bases',
+      'research-semanal.md',
+      `# Research semanal\n\nSemana del ${from} al ${to}. Lo escribe el planner y se reemplaza cada semana.\n\n${output.research.trim()}\n`,
+    );
+  }
   const created: Item[] = [];
   for (const idea of output.items ?? []) {
     const date = new Date(idea.scheduled_at);
