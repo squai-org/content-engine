@@ -4,14 +4,10 @@ export type InstagramConnection = {
   userId: string;
   username: string;
   token: string;
-  expiresAt: number;
-  refreshedAt: number;
+  expiresAt: number | null;
 };
 
 export const CONNECTION_KEY = 'instagram';
-export const TOKEN_LIFETIME_MS = 60 * 24 * 60 * 60 * 1000;
-
-const SCOPES = ['instagram_business_basic', 'instagram_business_content_publish'];
 
 type Payload = Record<string, unknown>;
 
@@ -20,15 +16,16 @@ export function callbackUrl(config: Config): string {
 }
 
 export function appConfigured(config: Config): boolean {
-  return Boolean(config.igAppId && config.igAppSecret);
+  return Boolean(config.igAppId && config.igAppSecret && config.igConfigId);
 }
 
 export function authorizeUrl(config: Config, state: string): string {
   const query = new URLSearchParams({
     client_id: config.igAppId,
+    config_id: config.igConfigId,
     redirect_uri: callbackUrl(config),
     response_type: 'code',
-    scope: SCOPES.join(','),
+    override_default_response_type: 'true',
     state,
   });
   return `${config.igAuthUrl}?${query}`;
@@ -36,13 +33,10 @@ export function authorizeUrl(config: Config, state: string): string {
 
 async function readPayload(response: Response): Promise<Payload> {
   const body = (await response.json().catch(() => ({}))) as Payload;
-  if (!response.ok || body.error || body.error_message) {
+  if (!response.ok || body.error) {
     const error = body.error as { message?: string } | string | undefined;
-    const text =
-      (body.error_message as string | undefined) ??
-      (typeof error === 'string' ? error : error?.message) ??
-      `HTTP ${response.status}`;
-    throw new Error(`Instagram: ${text}`);
+    const text = (typeof error === 'string' ? error : error?.message) ?? `HTTP ${response.status}`;
+    throw new Error(`Meta: ${text}`);
   }
   return body;
 }
@@ -51,42 +45,49 @@ export async function completeConnection(
   config: Config,
   rawCode: string,
   fetchImpl: typeof fetch = fetch,
-  now = Date.now(),
 ): Promise<InstagramConnection> {
-  const code = rawCode.replace(/#_$/, '');
-  const short = await readPayload(
-    await fetchImpl(config.igTokenUrl, {
-      method: 'POST',
-      body: new URLSearchParams({
+  const graph = config.igGraphUrl;
+  const exchange = await readPayload(
+    await fetchImpl(
+      `${graph}/oauth/access_token?${new URLSearchParams({
         client_id: config.igAppId,
         client_secret: config.igAppSecret,
-        grant_type: 'authorization_code',
         redirect_uri: callbackUrl(config),
-        code,
-      }),
-    }),
-  );
-  const exchange = new URLSearchParams({
-    grant_type: 'ig_exchange_token',
-    client_secret: config.igAppSecret,
-    access_token: String(short.access_token ?? ''),
-  });
-  const long = await readPayload(await fetchImpl(`${config.igGraphUrl}/access_token?${exchange}`));
-  const token = String(long.access_token ?? '');
-  if (!token) throw new Error('Instagram: no entregó un token de larga duración.');
-  const profile = await readPayload(
-    await fetchImpl(
-      `${config.igGraphUrl}/me?${new URLSearchParams({ fields: 'user_id,username', access_token: token })}`,
+        code: rawCode.replace(/#_$/, ''),
+      })}`,
     ),
   );
-  const userId = String(profile.user_id ?? short.user_id ?? '');
-  if (!userId) throw new Error('Instagram: no entregó el id de la cuenta.');
-  const lifetime = Number(long.expires_in) * 1000 || TOKEN_LIFETIME_MS;
+  const token = String(exchange.access_token ?? '');
+  if (!token) throw new Error('Meta: no entregó un token.');
+
+  const debug = await readPayload(
+    await fetchImpl(
+      `${graph}/debug_token?${new URLSearchParams({
+        input_token: token,
+        access_token: `${config.igAppId}|${config.igAppSecret}`,
+      })}`,
+    ),
+  );
+  const expiresAt = Number((debug.data as Payload | undefined)?.expires_at ?? 0);
+
+  const accounts = await readPayload(
+    await fetchImpl(
+      `${graph}/me/assigned_instagram_accounts?${new URLSearchParams({
+        fields: 'id,username',
+        access_token: token,
+      })}`,
+    ),
+  );
+  const [account] = (accounts.data as Payload[] | undefined) ?? [];
+  if (!account?.id) {
+    throw new Error(
+      'Meta no asignó ninguna cuenta de Instagram. Agrega business_management a la configuración de Facebook Login for Business y vuelve a conectar.',
+    );
+  }
   return {
-    userId,
-    username: String(profile.username ?? ''),
+    userId: String(account.id),
+    username: String(account.username ?? ''),
     token,
-    expiresAt: now + lifetime,
-    refreshedAt: now,
+    expiresAt: expiresAt > 0 ? expiresAt * 1000 : null,
   };
 }

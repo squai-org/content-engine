@@ -17,14 +17,15 @@ export type Config = {
   igGraphUrl: string;
   igAppId: string;
   igAppSecret: string;
+  igConfigId: string;
   igAuthUrl: string;
-  igTokenUrl: string;
 };
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   const port = Number(env.PORT ?? 8787);
   const adminPassword = env.ADMIN_PASSWORD ?? '';
   const sessionSecret = env.SESSION_SECRET ?? '';
+  const graphVersion = env.IG_GRAPH_VERSION ?? 'v26.0';
   if (!adminPassword || !sessionSecret) {
     throw new Error('ADMIN_PASSWORD y SESSION_SECRET son obligatorios.');
   }
@@ -42,10 +43,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     chromiumPath: env.CHROMIUM_PATH || undefined,
     igUserId: env.IG_USER_ID ?? '',
     igAccessToken: env.IG_ACCESS_TOKEN ?? '',
-    igGraphUrl: (env.IG_GRAPH_URL ?? 'https://graph.instagram.com').replace(/\/$/, ''),
+    igGraphUrl: (env.IG_GRAPH_URL ?? `https://graph.facebook.com/${graphVersion}`).replace(/\/$/, ''),
     igAppId: env.IG_APP_ID ?? '',
     igAppSecret: env.IG_APP_SECRET ?? '',
-    igAuthUrl: env.IG_AUTH_URL ?? 'https://www.instagram.com/oauth/authorize',
-    igTokenUrl: env.IG_TOKEN_URL ?? 'https://api.instagram.com/oauth/access_token',
+    igConfigId: env.IG_CONFIG_ID ?? '',
+    igAuthUrl: env.IG_AUTH_URL ?? `https://www.facebook.com/${graphVersion}/dialog/oauth`,
   };
 }

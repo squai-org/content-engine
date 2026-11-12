@@ -163,6 +163,7 @@ DATA_DIR=$DATA_DIR
 CLAUDE_BIN=$(command -v claude)
 IG_APP_ID=
 IG_APP_SECRET=
+IG_CONFIG_ID=
 ENV
   chown root:"$APP_USER" "$ENV_FILE"
   chmod 640 "$ENV_FILE"

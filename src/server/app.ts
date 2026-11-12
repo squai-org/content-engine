@@ -102,7 +102,7 @@ export function createApp(ctx: Context, fetchImpl: typeof fetch = fetch): Hono {
 
   app.post('/api/connections/instagram/start', async (c) => {
     if (!appConfigured(config)) {
-      return c.json({ error: 'Falta IG_APP_ID o IG_APP_SECRET en el servidor.' }, 400);
+      return c.json({ error: 'Falta IG_APP_ID, IG_APP_SECRET o IG_CONFIG_ID en el servidor.' }, 400);
     }
     const state = randomBytes(24).toString('hex');
     await setSignedCookie(c, STATE_COOKIE, state, config.sessionSecret, {
